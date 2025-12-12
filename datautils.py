@@ -1,7 +1,11 @@
 import numpy as np
 import torch
 
-import datasets
+from datasets import load_dataset
+# import os
+# os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+# os.environ['HF_DATASETS_OFFLINE'] = '1'
+# os.environ['HF_DATASETS_DOWNLOAD_MODE'] = 'reuse_dataset_if_exists'
 
 
 def set_seed(seed):
@@ -10,7 +14,6 @@ def set_seed(seed):
 
 
 def get_wikitext2(nsamples, seed, seqlen, model, bsz = 8):
-    from datasets import load_dataset
     traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
     testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
 
@@ -44,7 +47,7 @@ def get_wikitext2(nsamples, seed, seqlen, model, bsz = 8):
     return trainloader, testenc
 
 def get_ptb(nsamples, seed, seqlen, model):
-    from datasets import load_dataset
+
     traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train')
     valdata = load_dataset('ptb_text_only', 'penn_treebank', split='validation')
 
@@ -130,7 +133,7 @@ def get_c4(nsamples, seed, seqlen, model, bsz = 8):
     return trainloader, valenc 
 
 def get_ptb_new(nsamples, seed, seqlen, model):
-    from datasets import load_dataset
+
     traindata = load_dataset('ptb_text_only', 'penn_treebank', split='train')
     testdata = load_dataset('ptb_text_only', 'penn_treebank', split='test')
 
@@ -152,7 +155,6 @@ def get_ptb_new(nsamples, seed, seqlen, model):
     return trainloader, testenc
 
 def get_c4_new(nsamples, seed, seqlen, model):
-    from datasets import load_dataset
 
     traindata = load_dataset(
         'allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train'

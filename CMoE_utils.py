@@ -182,12 +182,28 @@ def construct_experts_k_means(
 
 
 @torch.no_grad()
-def construct_moe(layer, inp, attention_mask, position_ids, n_experts, n_activated, n_shared, args):
+def construct_moe(layer, inp, attention_mask, position_ids, position_embeddings, n_experts, n_activated, n_shared, args):
 
+    device = next(layer.parameters()).device
+    
     # Forward attention
-    residual = inp.to('cuda')
-    hidden_states = layer.input_layernorm(inp.to('cuda'))
-    hidden_states = layer.self_attn(hidden_states=hidden_states, attention_mask=attention_mask, position_ids=position_ids)[0]
+    inp = inp.to(device)
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(device)
+    
+    if position_ids is not None:
+        position_ids = position_ids.to(device)
+    
+    # if position_embeddings is not None:
+    #     position_embeddings = position_embeddings.to(device)
+
+    residual = inp
+    hidden_states = layer.input_layernorm(inp)
+    hidden_states = layer.self_attn(
+        hidden_states=hidden_states, 
+        attention_mask=attention_mask, 
+        position_ids=position_ids,
+        position_embeddings=position_embeddings)[0]
     hidden_states = residual + hidden_states
     residual = hidden_states
     hidden_states = layer.post_attention_layernorm(hidden_states)
@@ -202,6 +218,9 @@ def construct_moe(layer, inp, attention_mask, position_ids, n_experts, n_activat
     # Calculate activation markers, activation rates
     counts, rates, markers = analyze_neuron_activations(scores_all, K=args.k_act, plot_results=False, save_path=f'./plot/scores_analysis_{layer.self_attn.layer_idx}.png')
 
+    # 可视化激活率
+    # plot_activation_rates(counts, rates, save_path=f'./plot/activation_rates_{layer.self_attn.layer_idx}.png')
+    
     # Construct shared and routed experts
     expert_groups, experts, representative_indices = construct_experts_k_means(
         rates,
@@ -234,5 +253,7 @@ def construct_moe(layer, inp, attention_mask, position_ids, n_experts, n_activat
 
 
     layer.mlp = moe
+
+    del h, h_pre, scores_all, residual, hidden_states, 
 
     return moe_out

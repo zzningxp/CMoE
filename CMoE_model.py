@@ -38,8 +38,8 @@ class Router(nn.Module):
         self.gate = nn.Linear(hidden_size, n_experts, bias=False)
         self.classifier = nn.Linear(hidden_size, n_experts, bias=False)
 
-        self.extra_scale = nn.Parameter(torch.zeros(n_experts, device='cuda', dtype=torch.bfloat16))
-        self.extra_bias = torch.zeros(n_experts, device='cuda', dtype=torch.float32)
+        self.extra_scale = nn.Parameter(torch.zeros(n_experts, dtype=torch.bfloat16))
+        self.extra_bias = nn.Parameter(torch.zeros(n_experts, dtype=torch.float32))
         self.bias_update_speed = bias_speed
     
     def update_bias(self, counts):
@@ -57,11 +57,12 @@ class Router(nn.Module):
 
         scores = scores.softmax(dim=-1, dtype=torch.float32)
         original_scores = scores
-        scores = scores + self.extra_bias[None, :]
+        
+        scores = scores + self.extra_bias.to(x.device)[None, :]
 
         indices = torch.topk(scores, self.topk, dim=-1)[1]
 
-        original_scores = 1 + original_scores*self.extra_scale
+        original_scores = 1 + original_scores*self.extra_scale.to(x.device)
         weights = original_scores.gather(1, indices)
 
         return weights.type_as(x), indices
@@ -106,4 +107,3 @@ class MoE(nn.Module):
                 y[idx] += expert(x[idx]) 
         z = self.shared_experts(x)
         return (y + z).view(shape)
-
