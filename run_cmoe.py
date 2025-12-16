@@ -25,6 +25,7 @@ def get_llama(model):
     from transformers import LlamaForCausalLM
     model = LlamaForCausalLM.from_pretrained(model, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, device_map = 'auto')
     model.seqlen = 2048
+    # model.seqlen = 4096
     return model
 
 def get_llava(model):
