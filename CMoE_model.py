@@ -106,8 +106,11 @@ class MoE(nn.Module):
                 y[idx] += expert(x[idx]) * weights[idx, top, None]
             else:
                 y[idx] += expert(x[idx]) 
-        z = self.shared_experts(x)
-        hidden_states = (y + z).view(shape)
+        if self.shared_experts is not None:
+            z = self.shared_experts(x)
+            hidden_states = (y + z).view(shape)
+        else:
+            hidden_states = y.view(shape)
 
         if self.return_router_info:
             return hidden_states, weights
