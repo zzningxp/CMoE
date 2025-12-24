@@ -19,8 +19,8 @@ import lap
 
 @torch.no_grad()
 def analyze_neuron_activations(scores: torch.Tensor, plot_results: bool = False,
-                             save_path: Optional[str] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-    K = max(1, math.ceil(scores.shape[-1] * 0.1))  # Top 10% neurons 
+                             save_path: Optional[str] = None, sparsity = 0.1) -> Tuple[torch.Tensor, torch.Tensor]:
+    K = max(1, math.ceil(scores.shape[-1] * sparsity))  # Top 10% neurons 
     print("K (top neurons per sample):", scores.shape, K)
 
     scores = scores.detach().cpu()
@@ -135,9 +135,8 @@ def construct_experts_k_means(
     # print(len(selected_index), markers.shape, k)
     centroids = markers[:, selected_index].clone()
 
-    max_iters = 2
-
-    prev_assignments = None
+    max_iters = 10
+    prev_cost = -1
 
     for iteration in range(max_iters):
         
@@ -156,10 +155,11 @@ def construct_experts_k_means(
         assignments = torch.tensor(row_ind // cluster_size)
         print("Assignments shape, row_ind, col_ind, cluster_size, cost:", assignments.shape, row_ind, col_ind, cluster_size, cost)
 
-        if prev_assignments is not None and torch.all(assignments == prev_assignments):
+        if prev_cost is not None and abs(cost - prev_cost) / cost < 1e-3:
+            print("Converged after", iteration + 1, "iterations")
             break
         
-        prev_assignments = assignments.clone()
+        prev_cost = cost
         
         for i in range(k):
             cluster_points = markers[:, remaining_indices_list][:, assignments == i]
@@ -279,37 +279,16 @@ def construct_moe(layer, inp, attention_mask, position_ids, position_embeddings,
 
     return moe_out
 
-def merged_experts(experts: nn.ModuleList) -> LlamaMLP:
-    if not experts:
-        raise ValueError("")
-        
-    hidden_size = experts[0].gate_proj.in_features
-
-    merged_intermediate_size = sum(expert.gate_proj.out_features for expert in experts)
-    for expert in experts:
-        print(expert.gate_proj.weight.shape, expert.up_proj.weight.shape, expert.down_proj.weight.shape)
-    
-    merged_expert = LlamaMLP(hidden_size, merged_intermediate_size)
-    
-    gate_proj_weights = torch.cat([expert.gate_proj.weight for expert in experts], dim=0)
-    merged_expert.gate_proj.weight.data = gate_proj_weights
-    
-    up_proj_weights = torch.cat([expert.up_proj.weight for expert in experts], dim=0)
-    merged_expert.up_proj.weight.data = up_proj_weights
-    
-    down_proj_weights = torch.cat([expert.down_proj.weight for expert in experts], dim=1)
-    merged_expert.down_proj.weight.data = down_proj_weights
-    
-    print(len(experts), merged_intermediate_size, merged_expert.gate_proj.weight.shape, merged_expert.up_proj.weight.shape, merged_expert.down_proj.weight.shape)
-
-    return merged_expert
-
 @torch.no_grad()
-def construct_moe_from_existing(layer, inp, attention_mask, position_ids, position_embeddings, n_experts, n_activated, n_shared, args, split_factor=2):
+def construct_moe_from_existing(layer, inp, attention_mask, position_ids, position_embeddings, n_experts, n_activated, n_shared, args):
 
     device = next(layer.parameters()).device
     
-    print(f"Converting existing MoE layer with {len(layer.mlp.experts)} experts and {int(hasattr(layer.mlp, 'shared_expert'))} shared experts to {n_experts} experts")
+    slice_expert_num = n_experts // len(layer.mlp.experts)
+    assert slice_expert_num * len(layer.mlp.experts) == n_experts, "n_experts must be multiple of existing expert num"
+    
+    print(f"Converting existing MoE layer with {len(layer.mlp.experts)} experts and {int(hasattr(layer.mlp, 'shared_expert'))} shared experts \
+           to {n_experts} experts")
     
     # Forward attention
     inp = inp.to(device)
@@ -334,115 +313,105 @@ def construct_moe_from_existing(layer, inp, attention_mask, position_ids, positi
     # print(hidden_states.shape)
     # print(layer.mlp.experts)
 
-    # Get all expert projections
+    # Get original MoE structure information
     ori_expert_num = len(layer.mlp.experts)
     ori_up_proj_size = layer.mlp.experts[0].up_proj.weight.shape[0]
     ori_hidden_size = hidden_states.shape[2]
     print(f"Original expert num: {ori_expert_num}, up_proj_size per expert: {ori_up_proj_size}, hidden_size: {ori_hidden_size}")
 
-    all_scores = []
-    for i, expert in enumerate(layer.mlp.experts):
+    all_new_experts = nn.ModuleList()
+    new_router = Router(ori_hidden_size, n_experts, n_activated, bias_speed=args.bias_speed)
+    # new_router.classifier.weight.data = torch.zeros(ori_hidden_size, n_experts)
+    new_router.gate.weight.data = torch.zeros(n_experts, ori_hidden_size).to(torch.bfloat16).to(device)
+    new_router.classifier.weight.data = torch.ones(n_experts, ori_hidden_size).to(torch.bfloat16).to(device)
+    ori_router_gate = layer.mlp.gate.weight
+    total_neurons_processed = 0
+
+    print(f"Original router gate weights shape: {ori_router_gate.shape}")
+
+    # Process each original expert
+    for expert_idx, expert in enumerate(layer.mlp.experts):
+        print(f"\nProcessing original expert {expert_idx} / {ori_expert_num}")
+        
+        # Get scores for this specific expert
         h = expert.act_fn(F.linear(F.normalize(h_pre, p=2, dim=-1), F.normalize(expert.gate_proj.weight, p=2, dim=1)))
         h = h * F.linear(F.normalize(h_pre, p=2, dim=-1), F.normalize(expert.up_proj.weight, p=2, dim=1))
-        scores = h.to('cpu')
-        # print(f"Expert scores shape:", i, scores.shape)
+        expert_scores = h.to('cpu')
+        
+        # print(f"Expert {expert_idx} scores shape: {expert_scores.shape}")
 
-        all_scores.append(scores)
+        # Calculate activation markers and rates for this expert's neurons
+        counts, rates, markers = analyze_neuron_activations(expert_scores, plot_results=False, sparsity=0.01)
+        
+        # Determine number of new experts to create from this original expert
+        # We'll split each original expert into split_factor new experts
     
-    all_scores = torch.cat(all_scores, dim=2)
-    print("All experts scores shape:", all_scores.shape)
+        expert_groups, representative_indices = construct_experts_k_means(
+            rates,
+            markers,
+            num_experts = slice_expert_num,
+            num_shared_experts = 0,
+        )
 
-    all_up_proj_size = all_scores.shape[2]
-    embedding_size = hidden_states.shape[2]
-    
-    # Calculate activation markers, activation rates
-    counts, rates, markers = analyze_neuron_activations(all_scores, plot_results=True, save_path=f'./plot/scores_analysis_{layer.self_attn.layer_idx}.png')
-    
-    # Construct new experts from the reconstructed dense weights
-    expert_groups, representative_indices = construct_experts_k_means(
-        rates,
-        markers,
-        num_experts = n_experts,
-        num_shared_experts = n_shared,
-    )
-    
-    split_shared_groups = []
-    if n_shared > 0:
-        shared_size = len(expert_groups[0]) // n_shared
-        for i in range(n_shared):
-            start_idx = i * shared_size
-            end_idx = (i + 1) * shared_size 
-            split_shared_groups.append(expert_groups[0][start_idx:end_idx])
-    
-    # for group in expert_groups[:]:
-    #     print(len(group))
-    expert_groups = split_shared_groups + expert_groups[1:]
-
-    new_experts = nn.ModuleList()
-    for expert_indices in expert_groups:
-        expert_mlp = LlamaMLP(embedding_size, len(expert_indices)).to(device)
-
-        with torch.no_grad():
-            gate_proj_weights = []
-            up_proj_weights = []
-            down_proj_weights = []
+        expert_groups = expert_groups[1:]
+        # Create new experts for this original expert
+        for group_indices in expert_groups:
+            expert_mlp = LlamaMLP(ori_hidden_size, len(group_indices)).to(device)
             
-            for idx in expert_indices:
-                x = idx // ori_up_proj_size   # 原专家索引
-                y = idx % ori_up_proj_size    # 在原专家中的位置
+            with torch.no_grad():
+                gate_proj_weights = []
+                up_proj_weights = []
+                down_proj_weights = []
                 
-                gate_proj_weights.append(layer.mlp.experts[x].gate_proj.weight.data[y, :])
-                up_proj_weights.append(layer.mlp.experts[x].up_proj.weight.data[y, :])
-                down_proj_weights.append(layer.mlp.experts[x].down_proj.weight.data[:, y])
+                print(f"Creating new expert with {len(group_indices)} neurons from original expert {expert_idx}")
+                for global_idx in group_indices:    
+                    gate_proj_weights.append(layer.mlp.experts[expert_idx].gate_proj.weight.data[global_idx, :])
+                    up_proj_weights.append(layer.mlp.experts[expert_idx].up_proj.weight.data[global_idx, :])
+                    down_proj_weights.append(layer.mlp.experts[expert_idx].down_proj.weight.data[:, global_idx])
+                
+                print(gate_proj_weights[0].shape, len(gate_proj_weights), expert_mlp.gate_proj.weight.shape)
+                expert_mlp.gate_proj.weight.data = torch.stack(gate_proj_weights)
+                expert_mlp.up_proj.weight.data = torch.stack(up_proj_weights)
+                expert_mlp.down_proj.weight.data = torch.stack(down_proj_weights, dim=1)
             
-            expert_mlp.gate_proj.weight.data = torch.stack(gate_proj_weights)
-            expert_mlp.up_proj.weight.data = torch.stack(up_proj_weights)
-            expert_mlp.down_proj.weight.data = torch.stack(down_proj_weights, dim=1)
-        
-        new_experts.append(expert_mlp)
-
-    # Router
-    router = Router(embedding_size, n_experts - n_shared, n_activated, bias_speed=args.bias_speed)
-
-    core_weights = []
-    core_gate_weights = []
-    for core_neuron in representative_indices:
-        x = core_neuron // ori_up_proj_size
-        y = core_neuron % ori_up_proj_size
-        
-        core_weights.append(layer.mlp.experts[x].up_proj.weight.data[y, :])
-        core_gate_weights.append(layer.mlp.experts[x].gate_proj.weight.data[y, :])
-        
-        # y = random.randint(0, ori_up_proj_size - 1)
-        # core_weights.append(torch.ones(layer.mlp.experts[x].up_proj.weight.shape[1]).to(dtype = torch.bfloat16).to(device))
-        # core_gate_weights.append(torch.ones(layer.mlp.experts[x].gate_proj.weight.shape[1]).to(dtype = torch.bfloat16).to(device))
+            all_new_experts.append(expert_mlp)
+            total_neurons_processed += len(group_indices)
+ 
+        # Router
+       
+        core_weights = []
+        core_gate_weights = []
+        for core_neuron in representative_indices:
+            core_weights.append(layer.mlp.experts[expert_idx].up_proj.weight.data[core_neuron, :])
+            core_gate_weights.append(layer.mlp.experts[expert_idx].gate_proj.weight.data[core_neuron, :])
+      
+        core_gate_weights = F.normalize(torch.stack(core_gate_weights).to(dtype=torch.bfloat16).to(device), p=2, dim=1)
+        expanded_gate = ori_router_gate.data[expert_idx, :].unsqueeze(0).repeat(slice_expert_num, 1).to(device)
+        new_router_gate = expanded_gate * core_gate_weights
+        print(new_router.gate.weight.shape)
+        new_router.gate.weight.data[expert_idx * slice_expert_num:(expert_idx + 1) * slice_expert_num, :] = new_router_gate
+        new_router.gate.weight.to(device)
     
-    core_weights = torch.stack(core_weights)
-    core_gate_weights = torch.stack(core_gate_weights)
-    router.classifier.weight.data = F.normalize(core_weights, p=2, dim=1)
-    router.gate.weight.data = F.normalize(core_gate_weights, p=2, dim=1)
+    # Now handle shared experts if needed
+    print(f"\nTotal neurons processed: {total_neurons_processed}")
+    print(f"Total new experts created from original experts: {len(all_new_experts)}")
 
     # MoE
-    new_up_proj_size = all_up_proj_size // n_experts
-    # print(embedding_size, new_up_proj_size, n_experts, n_shared, n_activated)
-
     return_router_info = 'olmoe' in args.model.lower()
-    moe = MoE(embedding_size, new_up_proj_size, n_experts, n_shared, n_activated, return_router_info)
-    moe.gate = router
-    moe.experts = new_experts[n_shared:]
-    if n_shared > 0:
-        moe.shared_experts = merged_experts(new_experts[:n_shared])
-    else:
-        moe.shared_experts = None
+    moe = MoE(ori_hidden_size, total_neurons_processed, len(all_new_experts), n_shared, n_activated, return_router_info)
+    moe.gate = new_router
+    moe.experts = all_new_experts
+    moe.shared_experts = None
     moe.cus_training = False
 
-    # print(moe)
+    # Test the new MoE
     if return_router_info:
         moe_out, _ = moe(h_pre)
     else:
         moe_out = moe(h_pre)
+    
     moe_out = moe_out + residual
-
     layer.mlp = moe
     
+    print("moe_out")
     return moe_out

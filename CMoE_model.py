@@ -35,10 +35,10 @@ class Router(nn.Module):
         self.topk = n_activated
 
         self.act_fn = F.silu
-        self.gate = nn.Linear(hidden_size, n_experts, bias=False)
-        self.classifier = nn.Linear(hidden_size, n_experts, bias=False)
+        self.gate = nn.Linear(n_experts, hidden_size, bias=False).to(torch.bfloat16)
+        self.classifier = nn.Linear(n_experts, hidden_size, bias=False).to(torch.bfloat16)
 
-        self.extra_scale = nn.Parameter(torch.zeros(n_experts, dtype=torch.bfloat16))
+        self.extra_scale = nn.Parameter(torch.ones(n_experts, dtype=torch.bfloat16))
         self.extra_bias = nn.Parameter(torch.zeros(n_experts, dtype=torch.float32))
         self.bias_update_speed = bias_speed
     
@@ -52,8 +52,10 @@ class Router(nn.Module):
         self.extra_bias.data[underloaded] += self.bias_update_speed
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-
-        scores = (self.classifier(x) * self.act_fn(self.gate(x))).abs() 
+        if self.classifier is None:
+            scores = self.act_fn(self.gate(x)).abs()
+        else:
+            scores = (self.classifier(x) * self.act_fn(self.gate(x))).abs() 
 
         scores = scores.softmax(dim=-1, dtype=torch.float32)
         original_scores = scores
@@ -76,13 +78,14 @@ class MoE(nn.Module):
         self.n_activated_experts = n_activated
         self.experts_start_idx = 0
         self.experts_end_idx = n_routed_experts
-        self.gate = Router(hidden_size, n_routed_experts, self.n_activated_experts)
+        # self.gate = Router(hidden_size, n_routed_experts, self.n_activated_experts)
+        self.gate = None
         self.n_shared_experts = n_shared
-        self.experts = nn.ModuleList([LlamaMLP(self.dim, moe_inter_dim) if self.experts_start_idx <= i < self.experts_end_idx else None
-                                      for i in range(self.n_routed_experts)])
-        self.shared_experts = LlamaMLP(self.dim, self.n_shared_experts * moe_inter_dim)
-
-
+        # self.experts = nn.ModuleList([LlamaMLP(self.dim, moe_inter_dim) if self.experts_start_idx <= i < self.experts_end_idx else None
+        #                               for i in range(self.n_routed_experts)])
+        self.experts = None
+        # self.shared_experts = LlamaMLP(self.dim, self.n_shared_experts * moe_inter_dim)
+        self.shared_experts = None
         self.cus_training = False
         self.enable_scale = True
         self.return_router_info = return_router_info
@@ -90,6 +93,7 @@ class MoE(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         shape = x.size()
         x = x.view(-1, self.dim)
+        # print(x.device, self.gate.gate.weight.device)
         weights, indices = self.gate(x)
         y = torch.zeros_like(x)
         counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts)
