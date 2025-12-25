@@ -355,12 +355,16 @@ def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_nu
       
         core_gate_weights = F.normalize(torch.stack(core_gate_weights).to(dtype=torch.bfloat16).to(device), p=2, dim=1)
         expanded_gate = ori_router_gate.data[expert_idx, :].unsqueeze(0).repeat(slice_expert_num, 1).to(device)
-        new_router_gate = expanded_gate * core_gate_weights
-        print(new_router.gate.weight.shape)
+        # new_router_gate = expanded_gate * core_gate_weights
+
+        alpha = 0.1
+        new_router_gate = (1 - alpha) * expanded_gate + alpha * core_gate_weights
+
         new_router.gate.weight.data[expert_idx * slice_expert_num:(expert_idx + 1) * slice_expert_num, :] = new_router_gate
         # new_router.gate.weight.data[expert_idx * slice_expert_num:(expert_idx + 1) * slice_expert_num, :] = expanded_gate
         new_router.gate.weight.to(device)
-    
+        print(new_router.gate.weight.shape)
+
     # Now handle shared experts if needed
     print(f"\nTotal neurons processed: {total_neurons_processed}")
     print(f"Total new experts created from original experts: {len(all_new_experts)}")
