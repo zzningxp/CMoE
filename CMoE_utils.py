@@ -153,10 +153,10 @@ def construct_experts_k_means(
         cost, row_ind, col_ind = lap.lapjv(repeated_distances)
 
         assignments = torch.tensor(row_ind // cluster_size)
-        print("Assignments shape, row_ind, col_ind, cluster_size, cost:", assignments.shape, row_ind, col_ind, cluster_size, cost)
+        # print("Assignments shape, row_ind, col_ind, cluster_size, cost:", assignments.shape, row_ind, col_ind, cluster_size, cost)
 
         if prev_cost is not None and abs(cost - prev_cost) / cost < 1e-3:
-            print("Converged after", iteration + 1, "iterations")
+            # print("Converged after", iteration + 1, "iterations")
             break
         
         prev_cost = cost
@@ -294,6 +294,7 @@ def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_nu
     ori_router_gate = layer.mlp.gate.weight
     total_neurons_processed = 0
 
+    scaling_factor = slice_expert_num
     print(f"Original router gate weights shape: {ori_router_gate.shape}")
 
     # Process each original expert
@@ -330,14 +331,14 @@ def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_nu
                 up_proj_weights = []
                 down_proj_weights = []
                 
-                print(f"Creating new expert with {len(group_indices)} neurons from original expert {expert_idx}")
+                # print(f"Creating new expert with {len(group_indices)} neurons from original expert {expert_idx}")
                 # group_indices = [i for i in range(1024)]
                 for global_idx in group_indices:    
                     gate_proj_weights.append(layer.mlp.experts[expert_idx].gate_proj.weight.data[global_idx, :])
                     up_proj_weights.append(layer.mlp.experts[expert_idx].up_proj.weight.data[global_idx, :])
-                    down_proj_weights.append(layer.mlp.experts[expert_idx].down_proj.weight.data[:, global_idx])
+                    down_proj_weights.append(layer.mlp.experts[expert_idx].down_proj.weight.data[:, global_idx] * scaling_factor)
                 
-                print(gate_proj_weights[0].shape, len(gate_proj_weights), expert_mlp.gate_proj.weight.shape)
+                # print(gate_proj_weights[0].shape, len(gate_proj_weights), expert_mlp.gate_proj.weight.shape)
                 expert_mlp.gate_proj.weight.data = torch.stack(gate_proj_weights)
                 expert_mlp.up_proj.weight.data = torch.stack(up_proj_weights)
                 expert_mlp.down_proj.weight.data = torch.stack(down_proj_weights, dim=1)
@@ -361,7 +362,6 @@ def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_nu
         new_router_gate = (1 - alpha) * expanded_gate + alpha * core_gate_weights
 
         new_router.gate.weight.data[expert_idx * slice_expert_num:(expert_idx + 1) * slice_expert_num, :] = new_router_gate
-        # new_router.gate.weight.data[expert_idx * slice_expert_num:(expert_idx + 1) * slice_expert_num, :] = expanded_gate
         new_router.gate.weight.to(device)
         print(new_router.gate.weight.shape)
 
