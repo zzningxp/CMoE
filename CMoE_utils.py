@@ -133,7 +133,7 @@ def analyze_expert_profile(layer, hidden_states, topk, save_path: Optional[str] 
     # g = g.sort(dim=-1, descending=True)
     # print(g[0])
     # expert_activate_sum = g  # [batch_size * seqlen, num_experts]
-    total_samples, inter_size = g.shape
+    total_samples, expert_num = g.shape
 
     activation_markers = torch.zeros_like(g)
     for i in range(total_samples):
@@ -142,6 +142,17 @@ def analyze_expert_profile(layer, hidden_states, topk, save_path: Optional[str] 
 
     activation_counts = activation_markers.sum(dim=0) 
     activation_rates = activation_counts / total_samples
+
+    sorted_indices = torch.argsort(activation_counts, descending=True)
+    ranks = torch.empty_like(sorted_indices)
+    ranks[sorted_indices] = torch.arange(expert_num, device=activation_counts.device)
+    drop_expert_nums = torch.ones_like(ranks)
+    drop_expert_nums[ranks < expert_num // 4] = 0
+    drop_expert_nums[ranks >= 3 * expert_num // 4] = 2
+    # print(drop_expert_nums, drop_expert_nums.sum())
+    assert drop_expert_nums.sum() == expert_num
+    # top 1/4 experts dropped none of neurons, bottom 1/4 experts dropped 2 slices neurons, other dropped 1 slice neurons
+    # assert all the drop_expert_nums are equal to expert_num
 
     # 可视化
     if save_path:
@@ -170,8 +181,10 @@ def analyze_expert_profile(layer, hidden_states, topk, save_path: Optional[str] 
         
         plt.savefig(save_path)
         plt.close()
-    
-    return activation_counts
+
+    print(activation_counts, ranks, drop_expert_nums)
+
+    return activation_counts, ranks, drop_expert_nums
 
 @torch.no_grad()
 def construct_experts_k_means(
@@ -397,22 +410,20 @@ def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_nu
     ori_router_gate = layer.mlp.gate.weight
 
     # expert_profile = analyze_expert_profile(layer, hidden_states, ori_expert_activate_num, save_path=f'./plot/expert_profile_analysis_{layer.self_attn.layer_idx}.png')
-    expert_profile = analyze_expert_profile(layer, hidden_states, ori_expert_activate_num)
-
-    drop_expert_num = 1
-    scaling_factor = slice_expert_num - drop_expert_num
-    # scaling_factor = slice_expert_num
-    new_expert_num = ori_expert_num * (slice_expert_num - drop_expert_num) 
-    sparsity = 0.1
+    expert_profile, expert_ranks, drop_expert_nums = analyze_expert_profile(layer, hidden_states, ori_expert_activate_num)
 
     all_new_experts = nn.ModuleList()
+    
+    avg_drop_expert_num = 1
+    new_expert_num = ori_expert_num * (slice_expert_num - avg_drop_expert_num) 
+    sparsity = 0.1
+
     new_router = Router(ori_hidden_size, new_expert_num, n_activated, bias_speed=args.bias_speed)
-    # new_router.classifier.weight.data = torch.zeros(ori_hidden_size, new_expert_num)
     new_router.gate.weight.data = torch.zeros(new_expert_num, ori_hidden_size).to(torch.bfloat16).to(device)
     new_router.classifier = None
     
     total_neurons_processed = 0
-
+    gate_start_idx = 0
     print(f"Original router gate weights shape: {ori_router_gate.shape}")
 
     # Process each original expert
@@ -436,7 +447,10 @@ def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_nu
             num_shared_experts = 0,
         )
 
-        expert_groups = expert_groups[1:slice_expert_num + 1 - drop_expert_num]
+        drop_expert_num = drop_expert_nums[expert_idx] * avg_drop_expert_num
+        scaling_factor = slice_expert_num - drop_expert_num
+
+        expert_groups = expert_groups[1:scaling_factor + 1]
         # Create new experts for this original expert
         for ii, group_indices in enumerate(expert_groups):
             expert_mlp = LlamaMLP(ori_hidden_size, len(group_indices)).to(device)
@@ -458,14 +472,16 @@ def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_nu
             all_new_experts.append(expert_mlp)
             total_neurons_processed += len(group_indices)
 
-        expanded_gate = ori_router_gate.data[expert_idx, :].unsqueeze(0).repeat(slice_expert_num - drop_expert_num, 1).to(device)
+        expanded_gate = ori_router_gate.data[expert_idx, :].unsqueeze(0).repeat(scaling_factor, 1).to(device)
 
         new_router_gate = expanded_gate
         # decay_gamma = 0.01
-        # for i in range(slice_expert_num - drop_expert_num):
+        # for i in range(scaling_factor):
         #     new_router_gate[i, :] = (1 - i * decay_gamma) * expanded_gate[i, :]
 
-        new_router.gate.weight.data[expert_idx * (slice_expert_num - drop_expert_num) : (expert_idx + 1) * (slice_expert_num - drop_expert_num), :] = new_router_gate
+        print(gate_start_idx, drop_expert_num, scaling_factor, expanded_gate.shape)
+        new_router.gate.weight.data[gate_start_idx: gate_start_idx + scaling_factor, :] = new_router_gate
+        gate_start_idx += scaling_factor
     
     new_router.gate.weight.to(device)
     
