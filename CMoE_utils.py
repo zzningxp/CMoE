@@ -124,10 +124,9 @@ def analyze_neuron_activations(scores: torch.Tensor, save_path: Optional[str] = 
     return activation_counts, activation_rates, activation_markers
     # return activation_counts, activation_values, activation_markers
 
-def equal_expert_profile(layer, hidden_states, topk, save_path: Optional[str] = None):
-    expert_num = layer.mlp.gate.weight.shape[0]
+def equal_expert_profile(expert_num, topk, save_path: Optional[str] = None):
     # print(f"equal_expert_profile expert_num: {expert_num}")
-    drop_expert_nums = torch.ones(expert_num, device=layer.mlp.gate.weight.device, dtype=torch.int)
+    drop_expert_nums = torch.ones(expert_num, dtype=torch.int)
     # print(drop_expert_nums)
     return None, None, drop_expert_nums
 
@@ -404,19 +403,21 @@ def construct_experts_by_rates(
     
     return expert_groups, None
 
-def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_num, device, args):
+def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args):
 
     ori_expert_num = len(layer.mlp.experts)
-    ori_up_proj_size = layer.mlp.experts[0].up_proj.weight.shape[0]
     ori_expert_activate_num = layer.mlp.top_k
-    # print(f"Original expert activate num: {ori_expert_activate_num}")
     ori_hidden_size = hidden_states.shape[2]
-    # print(f"Original expert num: {ori_expert_num}, expert activate num: {ori_expert_activate_num}, up_proj_size per expert: {ori_up_proj_size}, hidden_size: {ori_hidden_size}")
-    ori_router_gate = layer.mlp.gate.weight
+    
+    if if_quantized:
+        ori_router_gate = layer.mlp.gate.compressor.decompress_module(layer.mlp.gate)
+    else:
+        ori_router_gate = layer.mlp.gate.weight
 
     # expert_profile = analyze_expert_profile(layer, hidden_states, ori_expert_activate_num, save_path=f'./plot/expert_profile_analysis_{layer.self_attn.layer_idx}.png')
-    expert_profile, expert_ranks, drop_expert_nums = equal_expert_profile(layer, hidden_states, ori_expert_activate_num)
     # expert_profile, expert_ranks, drop_expert_nums = analyze_expert_profile(layer, hidden_states, ori_expert_activate_num)
+    expert_profile, expert_ranks, drop_expert_nums = equal_expert_profile(ori_expert_num, ori_expert_activate_num)
+    drop_expert_nums = drop_expert_nums.to(ori_router_gate.device)
 
     all_new_experts = nn.ModuleList()
     
@@ -435,11 +436,19 @@ def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_nu
 
     # Process each original expert
     for expert_idx, expert in enumerate(layer.mlp.experts):
+        if if_quantized:
+            ori_gate_proj_weights = expert.gate_proj.compressor.decompress_module(expert.gate_proj)
+            ori_up_proj_weights = expert.up_proj.compressor.decompress_module(expert.up_proj)
+            ori_down_proj_weights = expert.down_proj.compressor.decompress_module(expert.down_proj)
+        else:
+            ori_gate_proj_weights = expert.gate_proj.weight
+            ori_up_proj_weights = expert.up_proj.weight
+            ori_down_proj_weights = expert.down_proj.weight
+
         # print(f"\nProcessing original expert {expert_idx} / {ori_expert_num}")
-        
         # Get scores for this specific expert
-        h = expert.act_fn(F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(expert.gate_proj.weight, p=2, dim=1)))
-        h = h * F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(expert.up_proj.weight, p=2, dim=1))
+        h = expert.act_fn(F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(ori_gate_proj_weights, p=2, dim=1)))
+        h = h * F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(ori_up_proj_weights, p=2, dim=1))
         expert_scores = h.to('cpu')
         
         # print(f"Expert {expert_idx} scores shape: {expert_scores.shape}")
@@ -468,9 +477,9 @@ def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_nu
                 down_proj_weights = []
 
                 for global_idx in group_indices:
-                    gate_proj_weights.append(layer.mlp.experts[expert_idx].gate_proj.weight.data[global_idx, :])
-                    up_proj_weights.append(layer.mlp.experts[expert_idx].up_proj.weight.data[global_idx, :])
-                    down_proj_weights.append(layer.mlp.experts[expert_idx].down_proj.weight.data[:, global_idx] * scaling_factor)
+                    gate_proj_weights.append(ori_gate_proj_weights[global_idx, :])
+                    up_proj_weights.append(ori_up_proj_weights[global_idx, :])
+                    down_proj_weights.append(ori_down_proj_weights[:, global_idx] * scaling_factor)
 
                 expert_mlp.gate_proj.weight.data = torch.stack(gate_proj_weights)
                 expert_mlp.up_proj.weight.data = torch.stack(up_proj_weights)
@@ -491,7 +500,6 @@ def reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_nu
         gate_start_idx += remain_expert_num
     
     new_router.gate.weight.to(device)
-    
     # print(new_router.gate.weight.data[:16, :8])
     # print(new_router.gate.weight.shape)
     # print("sparsity", sparsity)
@@ -538,7 +546,11 @@ def construct_moe_from_existing(layer, layer_idx, inp, attention_mask, position_
     reconstruct_start_layer = args.reconstruct_start_layer
     reconstruct_end_layer = args.reconstruct_end_layer
     if layer_idx >= reconstruct_start_layer and layer_idx <= reconstruct_end_layer:
-        total_neurons_processed, all_new_experts, new_router = reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
+        if_quantized = hasattr(layer.mlp.gate, 'quantization_status')
+        if if_quantized:
+            from compressed_tensors.quantization.quant_config import QuantizationStatus
+            if_quantized = if_quantized and layer.mlp.gate.quantization_status == QuantizationStatus.COMPRESSED
+        total_neurons_processed, all_new_experts, new_router = reconstrut_moe(layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args)
 
         # MoE
         moe = MoE(hidden_states.shape[2], total_neurons_processed, len(all_new_experts), n_shared, n_activated, return_router_info)
