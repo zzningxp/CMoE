@@ -609,14 +609,11 @@ def construct_moe_from_existing(layer, layer_idx, inp, attention_mask, position_
         total_neurons_processed, all_new_experts, new_router = reconstruct_moe(layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args)
 
         # MoE
-        if not if_quantized:
-            moe = layer.mlp
-        else:
-            moe = MoE(hidden_states.shape[2], total_neurons_processed, len(all_new_experts), n_shared, n_activated, return_router_info)
-            moe.gate = new_router
-            moe.experts = all_new_experts
-            moe.shared_experts = None
-            moe.cus_training = False
+        moe = MoE(hidden_states.shape[2], total_neurons_processed, len(all_new_experts), n_shared, n_activated, return_router_info)
+        moe.gate = new_router
+        moe.experts = all_new_experts
+        moe.shared_experts = None
+        moe.cus_training = False
 
     # Test the new MoE
     if return_router_info:
