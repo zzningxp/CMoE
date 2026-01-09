@@ -76,7 +76,7 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
         # else:
         #     print("The model is a dense model. Proceeding to carve MoE layers. ")
         if moe_model_flag:
-            moe_out = construct_moe_from_existing(layer, 
+            moe_out = construct_moe_from_existing(model, layer, 
                 layer_idx,
                 carve_inp, 
                 attention_mask, 
@@ -88,7 +88,7 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
                 args = args
             )
         else:
-            moe_out = construct_moe(layer, 
+            moe_out = construct_moe(model, layer, 
                 layer_idx,
                 carve_inp, 
                 attention_mask, 

@@ -50,13 +50,6 @@ if __name__ == '__main__':
 
     print("model: ", args.model)
 
-    # layers = model.model.layers
-    # layer0 = layers[1]
-    # print(dir(layer0.mlp.gate))
-    # print(layer0.mlp.gate.weight_packed)
-    # print(layer0.mlp.gate.weight_scale)
-    # exit()
-
     ppl = []
     datasets = ['wikitext2', 'c4-new']
     # datasets = ['wikitext2', ]

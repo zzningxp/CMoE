@@ -346,7 +346,7 @@ def construct_experts_k_means(
 
 
 @torch.no_grad()
-def construct_moe(layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, n_experts, n_activated, n_shared, args):
+def construct_moe(model, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, n_experts, n_activated, n_shared, args):
 
     device = next(layer.parameters()).device
     
@@ -459,38 +459,29 @@ def construct_experts_by_rates(
     
     return expert_groups, None
 
-def reconstruct_moe(layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args):
+def reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args):
 
     ori_expert_num = len(layer.mlp.experts)
-    ori_expert_activate_num = layer.mlp.top_k
-    ori_hidden_size = hidden_states.shape[2]
-    
-    if if_quantized:
-        ori_router_gate = layer.mlp.gate.compressor.decompress_module(layer.mlp.gate)
-    else:
-        ori_router_gate = layer.mlp.gate.weight
-
     # expert_profile = analyze_expert_profile(layer, hidden_states, ori_expert_activate_num, save_path=f'./plot/expert_profile_analysis_{layer.self_attn.layer_idx}.png')
     # expert_profile, expert_ranks, drop_expert_nums = analyze_expert_profile(layer, hidden_states, ori_expert_activate_num)
-    expert_profile, expert_ranks, drop_expert_nums = equal_expert_profile(ori_expert_num, ori_expert_activate_num)
-    drop_expert_nums = drop_expert_nums.to(ori_router_gate.device)
+    expert_profile, expert_ranks, drop_expert_nums = equal_expert_profile(ori_expert_num, layer.mlp.top_k)
+    drop_expert_nums = drop_expert_nums.to(device)
 
-    all_new_experts = nn.ModuleList()
-    
     avg_drop_expert_num = 1
     new_expert_num = ori_expert_num * (slice_expert_num - avg_drop_expert_num) 
     scaling_factor = slice_expert_num - avg_drop_expert_num
     sparsity = 0.1
 
-    new_router = Router(ori_hidden_size, new_expert_num, n_activated, bias_speed=args.bias_speed)
-    new_router.gate.weight.data = torch.zeros(new_expert_num, ori_hidden_size).to(torch.bfloat16).to(device)
-    new_router.classifier = None
-    
+    if if_quantized:
+        ori_router_gate = layer.mlp.gate.compressor.decompress_module(layer.mlp.gate)
+    else:
+        ori_router_gate = layer.mlp.gate.weight
+    new_router = nn.Linear(model.config.hidden_size, new_expert_num, dtype=ori_router_gate.dtype, bias=False).to(device)
+    all_new_experts = nn.ModuleList()
+
     total_neurons_processed = 0
     gate_start_idx = 0
-    # print(f"Original router gate weights shape: {ori_router_gate.shape}")
 
-    # Process each original expert
     for expert_idx, expert in enumerate(layer.mlp.experts):
         if if_quantized:
             ori_gate_proj_weights = expert.gate_proj.compressor.decompress_module(expert.gate_proj)
@@ -525,7 +516,7 @@ def reconstruct_moe(layer, hidden_states, n_experts, n_activated, slice_expert_n
         expert_groups = expert_groups[1:remain_expert_num + 1]
         # Create new experts for this original expert
         for ii, group_indices in enumerate(expert_groups):
-            expert_mlp = LlamaMLP(ori_hidden_size, len(group_indices)).to(device)
+            expert_mlp = expert.__class__(model.config).to(device)
             
             with torch.no_grad():
                 gate_proj_weights = []
@@ -546,27 +537,24 @@ def reconstruct_moe(layer, hidden_states, n_experts, n_activated, slice_expert_n
 
         expanded_gate = ori_router_gate.data[expert_idx, :].unsqueeze(0).repeat(remain_expert_num, 1).to(device)
 
-        new_router_gate = expanded_gate
-        # decay_gamma = 0.01
-        # for i in range(scaling_factor):
-        #     new_router_gate[i, :] = (1 - i * decay_gamma) * expanded_gate[i, :]
-
-        # print(gate_start_idx, drop_expert_num, scaling_factor, expanded_gate.shape)
-        new_router.gate.weight.data[gate_start_idx: gate_start_idx + remain_expert_num, :] = new_router_gate
+        new_router.weight.data[gate_start_idx: gate_start_idx + remain_expert_num, :] = expanded_gate
         gate_start_idx += remain_expert_num
-    
-    new_router.gate.weight.to(device)
-    # print(new_router.gate.weight.data[:16, :8])
-    # print(new_router.gate.weight.shape)
-    # print("sparsity", sparsity)
-    # Now handle shared experts if needed
-    # print(f"\nTotal neurons processed: {total_neurons_processed}")
-    # print(f"Total new experts created from original experts: {len(all_new_experts)}, Gate router num: {gate_start_idx}")
 
-    return total_neurons_processed, all_new_experts, new_router
+    model.config.intermediate_size = all_new_experts[0].up_proj.weight.shape[0]
+    model.config.num_experts = new_expert_num
+    model.config.num_experts_per_tok = n_activated
+    print(model.config.intermediate_size, model.config.num_experts, model.config.num_experts_per_tok)
+
+    moe = layer.mlp
+    moe.num_experts = len(all_new_experts)
+    moe.top_k = n_activated
+    moe.gate = new_router
+    moe.experts = all_new_experts
+
+    return moe
 
 @torch.no_grad()
-def construct_moe_from_existing(layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, n_experts, n_activated, n_shared, args):
+def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, n_experts, n_activated, n_shared, args):
 
     device = next(layer.parameters()).device
     
@@ -597,35 +585,20 @@ def construct_moe_from_existing(layer, layer_idx, inp, attention_mask, position_
     # print(hidden_states.shape)
     # print(layer.mlp.experts)
 
-    return_router_info = 'olmoe' in args.model.lower()
-
     reconstruct_start_layer = args.reconstruct_start_layer
     reconstruct_end_layer = args.reconstruct_end_layer
     if layer_idx >= reconstruct_start_layer and layer_idx <= reconstruct_end_layer:
         if_quantized = hasattr(layer.mlp.gate, 'quantization_status')
+        # print(layer_idx, if_quantized)
         if if_quantized:
             from compressed_tensors.quantization.quant_config import QuantizationStatus
             if_quantized = layer.mlp.gate.quantization_status == QuantizationStatus.COMPRESSED
-        total_neurons_processed, all_new_experts, new_router = reconstruct_moe(layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args)
+        moe = reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args)
 
-        # MoE
-        moe = MoE(hidden_states.shape[2], total_neurons_processed, len(all_new_experts), n_shared, n_activated, return_router_info)
-        moe.gate = new_router
-        moe.experts = all_new_experts
-        moe.shared_experts = None
-        moe.cus_training = False
-
-    # Test the new MoE
-    if return_router_info:
-        if layer_idx >= reconstruct_start_layer and layer_idx <= reconstruct_end_layer:
-            moe_out, _ = moe(hidden_states)
-        else:
-            moe_out, _ = layer.mlp(hidden_states)
+    if layer_idx >= reconstruct_start_layer and layer_idx <= reconstruct_end_layer:
+        moe_out, _ = moe(hidden_states)
     else:
-        if layer_idx >= reconstruct_start_layer and layer_idx <= reconstruct_end_layer:
-            moe_out = moe(hidden_states)
-        else:
-            moe_out = layer.mlp(hidden_states)
+        moe_out, _ = layer.mlp(hidden_states)
     
     moe_out = moe_out + residual
     if layer_idx >= reconstruct_start_layer and layer_idx <= reconstruct_end_layer:
