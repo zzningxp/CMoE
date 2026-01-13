@@ -14,7 +14,63 @@ from CMoE_model import *
 from zero_eval import *
 from sft_utils import simple_sft
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from llmcompress import apply_quantization
+
+@torch.no_grad()
+def cmoe_ppl_eval(model, testloader, eval_set, args):
+    use_cache = model.config.use_cache
+    model.config.use_cache = False
+    
+    testenc = testloader.input_ids
+    # print("testenc.shape: ", testenc.shape)
+    nsamples = testenc.shape[1] // model.seqlen
+    nsamples = 64
+    print('ppl evaluation samples:', nsamples)
+
+    def get_activation():
+        def hook(model, input, output):
+            isnan = torch.isnan(output)
+            whereisnan = torch.where(isnan)
+            if whereisnan[1].shape[0] > 0:
+                output[whereisnan] = 0.0
+                print(whereisnan[1][0])
+        return hook
+
+    hooks = []
+    hook_handles = []
+    print(model, model.config)
+    if hasattr(model.config, 'num_experts'):
+        for i in range(model.config.num_experts):
+            hooks.append(model.model.layers[0].mlp.experts[i].up_proj)
+            hooks.append(model.model.layers[0].mlp.experts[i].gate_proj)
+
+    # print(model)
+    nlls = []
+    for i in tqdm(range(nsamples), desc='Evaluating...'):
+        batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(DEV)
+        target_ids = batch.clone()
+
+        for hook in hooks:
+            hook_handles.append(hook.register_forward_hook(get_activation()))
+
+        with torch.no_grad():
+            outputs = model(batch)
+            shift_logits = outputs.logits[:, :-1, :].contiguous()
+            shift_labels = target_ids[:, 1:].contiguous()
+
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            neg_log_likelihood = loss.float() * model.seqlen
+            nlls.append(neg_log_likelihood)
+
+        for hook in hooks:
+            hook_handles.pop().remove()
+    
+    # print(nlls)
+    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
+    print(f'ppl: {ppl.item():.4f}')
+    model.config.use_cache = use_cache
+
+    return ppl.item()
 
 def get_llama(model):
     def skip(*args, **kwargs):
@@ -56,7 +112,6 @@ def get_olmoe(model):
     return model
 
 def get_deepseek_v2_lite_gptq(model_path):
-    from auto_gptq import AutoGPTQForCausalLM
 
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     tokenizer.pad_token = tokenizer.eos_token
@@ -73,7 +128,7 @@ def get_deepseek_v2_lite_gptq(model_path):
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
         device_map='auto',
         trust_remote_code=True
@@ -92,7 +147,7 @@ def get_auto(model_path):
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
         device_map='auto',
         trust_remote_code=True
