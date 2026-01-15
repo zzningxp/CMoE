@@ -599,8 +599,8 @@ def reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_e
                 up_proj_weights_t = torch.stack(up_proj_weights).T
                 expert_mlp.up_proj.weight.data = lowrank_compress_svd(up_proj_weights_t, lowrank_sparsity).T
                 down_proj_weights = torch.stack(down_proj_weights, dim=1)
-                # expert_mlp.down_proj.weight.data = lowrank_compress_svd(down_proj_weights, lowrank_sparsity)
-                expert_mlp.down_proj.weight.data = down_proj_weights
+                expert_mlp.down_proj.weight.data = lowrank_compress_svd(down_proj_weights, lowrank_sparsity)
+                # expert_mlp.down_proj.weight.data = down_proj_weights
 
             all_new_experts.append(expert_mlp)
             new_expert_intermediate_size = expert_mlp.up_proj.weight.shape[0]
