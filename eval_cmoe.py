@@ -1,3 +1,5 @@
+from enum import auto
+from os import name
 import time
 
 import torch
@@ -11,8 +13,6 @@ import copy
 
 from CMoE_utils import *
 from CMoE_model import *
-from zero_eval import *
-from sft_utils import simple_sft
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 @torch.no_grad()
@@ -31,18 +31,29 @@ def cmoe_ppl_eval(model, testloader, eval_set, args):
             isnan = torch.isnan(output)
             whereisnan = torch.where(isnan)
             if whereisnan[1].shape[0] > 0:
-                output[whereisnan] = 0.0
+                # output[whereisnan] = 0.0
                 print(whereisnan[1][0])
         return hook
 
     hooks = []
     hook_handles = []
-    print(model, model.config)
-    if hasattr(model.config, 'num_experts'):
+    # print(model, model.config)
+    # print(hasattr(model.config, 'num_experts'))
+    if hasattr(model.config, 'num_experts'): ## OLmoe
         for i in range(model.config.num_experts):
             hooks.append(model.model.layers[0].mlp.experts[i].up_proj)
             hooks.append(model.model.layers[0].mlp.experts[i].gate_proj)
-
+    # if hasattr(model.config, 'n_routed_experts'): ## Deepseek-v3 / Moonlight
+    #     for i in range(model.config.n_routed_experts):
+    #         # for j 
+    #         hooks.append(model.model.layers[1].mlp.experts[i].up_proj)
+    #         hooks.append(model.model.layers[1].mlp.experts[i].gate_proj)
+    # hooks.append(model.model.layers[0].self_attn.kv_a_proj_with_mqa)
+    # hooks.append(model.model.layers[0].self_attn.kv_b_proj)
+    # hooks.append(model.model.layers[0].self_attn.q_proj)
+    # hooks.append(model.model.layers[0].self_attn.o_proj)
+    # hooks.append(model.model.layers[0].mlp)
+    # 
     # print(model)
     nlls = []
     for i in tqdm(range(nsamples), desc='Evaluating...'):
@@ -97,16 +108,12 @@ def get_llava(model):
     model.seqlen = 2048
     return model
 
-def get_olmoe(model):
-    def skip(*args, **kwargs):
-        pass
-    # torch.nn.init.kaiming_uniform_ = skip
-    # torch.nn.init.uniform_ = skip
-    # torch.nn.init.normal_ = skip
+def get_olmoe(model_path):
     from transformers import OlmoeForCausalLM
 
     # model = OlmoeForCausalLM.from_pretrained(model, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, device_map = 'auto')
-    model = AutoModelForCausalLM.from_pretrained(model, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, device_map = 'auto')
+    print(model_path)
+    model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, device_map = 'auto')
 
     model.seqlen = 2048
     return model
@@ -150,6 +157,7 @@ def get_auto(model_path):
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
         device_map='auto',
+        use_safetensors=True,
         trust_remote_code=True
     )
 
@@ -189,22 +197,58 @@ if __name__ == '__main__':
     parser.add_argument(        '--seed',
         type=int, default=0, help='Seed for sampling the calibration data.'
     )
+    parser.add_argument(        '--eval_zero',
+        action='store_true', help='Evaluate zero-shot performance.'
+    )
+
     args = parser.parse_args()
     
-    print("Loading model: ", args.model.lower())
-    model, tokenizer = load_model(args.model)
 
-    print("model: ", args.model)
+    if not args.eval_zero:
+        print("Loading model: ", args.model.lower())
+        model, tokenizer = load_model(args.model)
 
-    ppl = []
-    datasets = ['wikitext2', 'c4-new']
-    # datasets = ['wikitext2', ]
-    for dataset in datasets:
-        dataloader, testloader = get_loaders(
-            dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen, bsz = 1
+        print("model: ", args.model)
+        ppl = []
+        datasets = ['wikitext2', 'c4-new']
+        # datasets = ['wikitext2', ]
+        for dataset in datasets:
+            dataloader, testloader = get_loaders(
+                dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen, bsz = 1
+            )
+            print(dataset)
+            eval_set = dataset
+            ppl_i = cmoe_ppl_eval(model, testloader, eval_set, args)
+            ppl.append(f"{dataset}: {ppl_i}")
+            print("PPL on {}: {:.4f}".format(dataset, ppl_i))
+
+    if args.eval_zero:
+        from lm_eval import tasks, evaluator, utils
+        from lm_eval.models.huggingface import HFLM
+
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+            trust_remote_code=True
         )
-        print(dataset)
-        eval_set = dataset
-        ppl_i = cmoe_ppl_eval(model, testloader, eval_set, args)
-        ppl.append(f"{dataset}: {ppl_i}")
-        print("PPL on {}: {:.4f}".format(dataset, ppl_i))
+
+        model = HFLM(
+            pretrained=model,
+            trust_remote_code=True,
+            device="cuda",
+        )
+
+        task_list = ["arc_challenge", "arc_easy", "piqa", "boolq",]
+        # task_list = ["winogrande","hellaswag"]
+        for task in task_list:
+            results = evaluator.simple_evaluate(
+                model=model,
+                tasks=[task],
+                num_fewshot=5,
+                batch_size="auto",
+                device="cuda"
+            )
+            print(task, results["results"][task]) 

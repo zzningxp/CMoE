@@ -121,12 +121,6 @@ def analyze_neuron_activations(scores: torch.Tensor, save_path: Optional[str] = 
     return activation_counts, activation_rates, activation_markers
     # return activation_counts, activation_values, activation_markers
 
-def equal_expert_profile(expert_num, topk, save_path: Optional[str] = None):
-    # print(f"equal_expert_profile expert_num: {expert_num}")
-    drop_expert_nums = torch.ones(expert_num, dtype=torch.int)
-    # print(drop_expert_nums)
-    return None, None, drop_expert_nums
-
 def analyze_expert_profile(layer, hidden_states, topk, save_path: Optional[str] = None):
 
     g = layer.mlp.gate(hidden_states)
@@ -402,12 +396,11 @@ def construct_experts_by_rates(
     
     return expert_groups, None
 
-def reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args):
+def reconstruct_moe_harddrop(model, layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args):
 
     ori_expert_num = len(layer.mlp.experts)
-    # expert_profile = analyze_expert_profile(layer, hidden_states, ori_expert_activate_num, save_path=f'./plot/expert_profile_analysis_{layer.self_attn.layer_idx}.png')
-    # expert_profile, expert_ranks, drop_expert_nums = analyze_expert_profile(layer, hidden_states, ori_expert_activate_num)
-    expert_profile, expert_ranks, drop_expert_nums = equal_expert_profile(ori_expert_num, layer.mlp.top_k)
+    drop_expert_nums = torch.ones(ori_expert_num, dtype=torch.int)
+
     drop_expert_nums = drop_expert_nums.to(device)
 
     avg_drop_expert_num = 1
@@ -487,6 +480,142 @@ def reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_e
     model.config.num_experts = new_expert_num
     model.config.num_experts_per_tok = n_activated
     print(model.config.intermediate_size, model.config.num_experts, model.config.num_experts_per_tok)
+
+    moe = layer.mlp
+    moe.num_experts = len(all_new_experts)
+    moe.top_k = n_activated
+    moe.gate = new_router
+    moe.experts = all_new_experts
+
+    return moe
+
+def lowrank_compress_svd(weight_matrix, lowrank_sparsity, save_path=None):
+    U, S, Vh = torch.linalg.svd(weight_matrix.float(), full_matrices=False)
+
+    if lowrank_sparsity is not None:
+        rank = int(weight_matrix.shape[1] * (1 - lowrank_sparsity))
+    else:
+        S_sum = S.sum()
+        cum = torch.cumsum(S, 0)
+        rank = torch.searchsorted(cum, 0.99 * S_sum).item() + 1
+
+    ratio = S[:rank].sum() / S.sum()
+    # print(f"Rank: {rank}, Ratio: {ratio}")
+    
+    U_reduced = U[:, :]
+    S_reduced = S[:]
+    Vh_reduced = Vh[:, :rank]
+    # print(U_reduced.shape, S_reduced.shape, Vh_reduced.shape)
+    
+    low_rank_matrix = torch.mm(U_reduced, torch.mm(torch.diag(S_reduced), Vh_reduced))
+    # print(weight_matrix.shape, rank, low_rank_matrix.shape)
+
+    if save_path:
+        plt.figure(figsize=(12, 8))
+        
+        neuron_indices = np.arange(S.shape[0])
+        stats_text = ()
+        
+        S_cpu = S.cpu().numpy()
+        plt.plot(neuron_indices, S_cpu, 'b-', alpha=0.6)
+        plt.title(f'SVD decomposition of weight matrix, rank={rank}')
+        plt.xlabel('Neuron Index')
+        plt.ylabel('Weight Value')
+
+        plt.text(0.95, 0.95, stats_text,
+                transform=plt.gca().transAxes,
+                verticalalignment='top',
+                horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+       
+        plt.tight_layout()
+        
+        plt.savefig(save_path)
+        plt.close()
+    
+    return low_rank_matrix.to(weight_matrix.dtype)
+
+def reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args):
+
+    ori_expert_num = len(layer.mlp.experts)
+    new_expert_num = ori_expert_num * slice_expert_num 
+    scaling_factor = slice_expert_num
+
+    if if_quantized:
+        ori_router_gate = layer.mlp.gate.compressor.decompress_module(layer.mlp.gate)
+    else:
+        ori_router_gate = layer.mlp.gate.weight
+    new_router = nn.Linear(model.config.hidden_size, new_expert_num, dtype=ori_router_gate.dtype, bias=False).to(device)
+    all_new_experts = nn.ModuleList()
+
+    total_neurons_processed = 0
+    gate_start_idx = 0
+
+    for expert_idx, expert in enumerate(layer.mlp.experts):
+        if if_quantized:
+            ori_gate_proj_weights = expert.gate_proj.compressor.decompress_module(expert.gate_proj)
+            ori_up_proj_weights = expert.up_proj.compressor.decompress_module(expert.up_proj)
+            ori_down_proj_weights = expert.down_proj.compressor.decompress_module(expert.down_proj)
+        else:
+            ori_gate_proj_weights = expert.gate_proj.weight
+            ori_up_proj_weights = expert.up_proj.weight
+            ori_down_proj_weights = expert.down_proj.weight
+
+        # print(f"\nProcessing original expert {expert_idx} / {ori_expert_num}")
+        h = expert.act_fn(F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(ori_gate_proj_weights, p=2, dim=1)))
+        h = h * F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(ori_up_proj_weights, p=2, dim=1))
+        expert_scores = h.to('cpu')
+        
+        analyze_sparsity = 0.1
+        counts, rates, markers = analyze_neuron_activations(expert_scores, sparsity=analyze_sparsity)
+
+        expert_groups, representative_indices = construct_experts_by_rates(
+            rates,
+            markers,
+            num_experts = slice_expert_num,
+            num_shared_experts = 0,
+        )
+
+        lowrank_sparsity = 0
+        expert_groups = expert_groups[1:]
+        # Create new experts for this original expert
+        for ii, group_indices in enumerate(expert_groups):
+            n_neurons = len(group_indices)
+            expert_mlp = expert.__class__(model.config).to(device)
+            
+            with torch.no_grad():
+                gate_proj_weights = []
+                up_proj_weights = []
+                down_proj_weights = []
+
+                for global_idx in group_indices:
+                    gate_proj_weights.append(ori_gate_proj_weights[global_idx, :])
+                    up_proj_weights.append(ori_up_proj_weights[global_idx, :])
+                    down_proj_weights.append(ori_down_proj_weights[:, global_idx] * scaling_factor)
+
+                gate_proj_weights_t = torch.stack(gate_proj_weights).T
+                # expert_mlp.gate_proj.weight.data = lowrank_compress_svd(gate_proj_weights_t, r_neurons, save_path=f'plot/0_svd_gate_proj_{expert_idx}_{ii}.png').T
+                expert_mlp.gate_proj.weight.data = lowrank_compress_svd(gate_proj_weights_t, lowrank_sparsity).T
+                up_proj_weights_t = torch.stack(up_proj_weights).T
+                expert_mlp.up_proj.weight.data = lowrank_compress_svd(up_proj_weights_t, lowrank_sparsity).T
+                down_proj_weights = torch.stack(down_proj_weights, dim=1)
+                # expert_mlp.down_proj.weight.data = lowrank_compress_svd(down_proj_weights, lowrank_sparsity)
+                expert_mlp.down_proj.weight.data = down_proj_weights
+
+            all_new_experts.append(expert_mlp)
+            new_expert_intermediate_size = expert_mlp.up_proj.weight.shape[0]
+            total_neurons_processed += new_expert_intermediate_size
+
+            # print(expert_idx, ii, new_expert_intermediate_size, expert_mlp.gate_proj.weight.shape, expert_mlp.up_proj.weight.shape, expert_mlp.down_proj.weight.shape)
+        expanded_gate = ori_router_gate.data[expert_idx, :].unsqueeze(0).repeat(slice_expert_num, 1).to(device)
+
+        new_router.weight.data[gate_start_idx: gate_start_idx + slice_expert_num, :] = expanded_gate
+        gate_start_idx += slice_expert_num
+
+    model.config.intermediate_size = all_new_experts[0].up_proj.weight.shape[0]
+    model.config.num_experts = new_expert_num
+    model.config.num_experts_per_tok = n_activated
+    # print(model.config.intermediate_size, model.config.num_experts, model.config.num_experts_per_tok)
 
     moe = layer.mlp
     moe.num_experts = len(all_new_experts)

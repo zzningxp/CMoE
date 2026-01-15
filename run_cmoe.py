@@ -12,10 +12,8 @@ import copy
 from CMoE_utils import *
 from CMoE_model import *
 from CMoE_sequential import *
-from zero_eval import *
 from sft_utils import simple_sft
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from test.llmcompress import apply_quantization
 from eval_cmoe import cmoe_ppl_eval, load_model
 
 def save_results(file_name, results):
@@ -95,8 +93,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     
-    print("Loading model: ", args.model.lower())
-    model, tokenizer = load_model(args.model.lower())
+    print("Loading model: ", args.model)
+    model, tokenizer = load_model(args.model)
 
     dataloader, testloader = get_loaders(
         args.dataset, 
@@ -123,85 +121,8 @@ if __name__ == '__main__':
         carved_model.save_pretrained(carved_save_dir)
         tokenizer.save_pretrained(carved_save_dir)
 
-    quant_to_gptq = False
-    if quant_to_gptq:
-        DATASET_ID = "HuggingFaceH4/ultrachat_200k"
-        DATASET_SPLIT = "train_sft"
-        # Select number of samples. 512 samples is a good place to start.
-        # Increasing the number of samples can improve accuracy.
-        NUM_CALIBRATION_SAMPLES = 512
-        MAX_SEQUENCE_LENGTH = 2048
-
-        apply_quantization(carved_model, tokenizer, DATASET_ID, DATASET_SPLIT, NUM_CALIBRATION_SAMPLES, MAX_SEQUENCE_LENGTH)
-
-        quant_save_dir = "model/quantized_olmoe_cmoe_"
-        print(carved_model)
-        carved_model.save_pretrained(quant_save_dir, save_compressed=True)
-        tokenizer.save_pretrained(quant_save_dir)
-
-        quant_ppl = []
-        datasets = ['wikitext2', 'c4-new']
-        for dataset in datasets:
-            dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen, bsz = args.carve_bsz
-            )
-            print(dataset)
-            eval_set = dataset
-            ppl_i = cmoe_ppl_eval(model, testloader, eval_set, args)
-            quant_ppl.append(f"{dataset}: {ppl_i}")
-            print("Quantized model ppl: ", ppl_i)
-
     rt_construct = tick_1 - tick
     extra_time = tick_2 - tick_1
     rt = time.time() - tick - extra_time
     print("Runtime of training-free construction: ", rt_construct)
     print("Runtime of fine-tuning construction: ", rt)
-    
-    # model_name = model.split("/")[-1]
-    # save_dir = f"{model_name}_carved_{args.dataset}_{args.nsamples}_epoch_{args.epoch}_S{args.nshared}_A{args.nactivated}_E{args.nexperts}_K{args.k_act}_B{args.bias_speed}"
-    # print(f"Saving carved model to {save_dir}...")
-    # os.makedirs(save_dir, exist_ok=True)
-    # model.save_pretrained(save_dir)
-
-    # if 'llama-3' in args.model.lower():
-    #     name = "meta-llama/Meta-Llama-3-8B"
-    # else:
-    #     name = "meta-llama/Llama-2-7b-hf"
-
-    model_name = args.model.split("/")[-1]
-    file_name = f"{model_name}_{args.dataset}_{args.nsamples}_epoch_{args.epoch}_S{args.nshared}_A{args.nactivated}_E{args.nexperts}.txt"
-    dir_path = os.path.join('./result_logs', args.prefix) if args.prefix is not None else './result_logs'
-    if not os.path.isdir(dir_path):
-        os.makedirs(dir_path)
-    file_name = os.path.join(dir_path, file_name)
-
-    save_results(file_name, f"pre_ppl: {str(pre_ppl)}")
-    save_results(file_name, f"ft_ppl: {str(ppl)}")
-    save_results(file_name, f"runtime_construct: {rt_construct}")
-    save_results(file_name, f"runtime_all: {rt}")
-
-    if args.eval_zero:
-        task_list = ["winogrande"]
-        results_1 = eval_zero_shot(name, carved_model, tokenizer, task_list=task_list, num_fewshot=5)
-        save_results(file_name, results_1)
-
-        task_list = ["arc_challenge"]
-        results_2 = eval_zero_shot(name, carved_model, tokenizer, task_list=task_list, num_fewshot=25)
-        save_results(file_name, results_2)
-
-        task_list = ["hellaswag"]
-        results_3 = eval_zero_shot(name, carved_model, tokenizer, task_list=task_list, num_fewshot=10)
-        save_results(file_name, results_3)
-
-        task_list = ["sciq","piqa"]
-        results_4 = eval_zero_shot(name, carved_model, tokenizer, task_list=task_list, num_fewshot=0)
-        save_results(file_name, results_4)
-
-        task_list = ["boolq"]
-        results_5 = eval_zero_shot(name, carved_model, tokenizer, task_list=task_list, num_fewshot=32)
-        save_results(file_name, results_5)
-
-
-    print("number of data: ", args.nsamples)
-    print("model: ", args.model)
-    print("cali_data: ", args.dataset)

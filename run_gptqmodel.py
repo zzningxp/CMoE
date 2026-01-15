@@ -9,8 +9,9 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
+quant_method = "gptq"
 model_id = args.model
-quant_path = args.model.rstrip("/").split("/")[-1] + "-" + "GPTQ"
+quant_path = args.model.rstrip("/").split("/")[-1] + "-" + quant_method
 
 calibration_dataset = load_dataset(
     "allenai/c4",
@@ -21,8 +22,8 @@ calibration_dataset = load_dataset(
 quant_config = QuantizeConfig(
     bits=4, 
     group_size=128,
-    desc_act=False,
-    vram_strategy="balanced",
+    quant_method=quant_method,
+    # vram_strategy="balanced",
 )
 
 model = GPTQModel.load(model_id, quant_config, trust_remote_code=True)
