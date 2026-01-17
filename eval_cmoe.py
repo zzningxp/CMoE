@@ -118,26 +118,26 @@ def get_olmoe(model_path):
     model.seqlen = 2048
     return model
 
-def get_deepseek_v2_lite_gptq(model_path):
+def get_deepseek_v2_lite(model_path):
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    # model = AutoGPTQForCausalLM.from_pretrained(
-    #     model_path,
-    #     torch_dtype=torch.float16,
-    #     low_cpu_mem_usage=True,
-    #     device_map="auto",
-    #     trust_remote_code=True,
-    #     quantize_config=None,
-    #     use_safetensors=True
-    # )
-
+    layer_num = 26 + 1
+    layer_per_gpu = 7
+    device_map = {
+        "model.embed_tokens": "cpu",
+        **{f"model.layers.{k}": "cpu" for k in range(0, layer_num - layer_per_gpu*2)                       },
+        **{f"model.layers.{k}": 0 for k in range(layer_num - layer_per_gpu*2, layer_num - layer_per_gpu)   },
+        **{f"model.layers.{k}": 1 for k in range(layer_num - layer_per_gpu, layer_num)                     },
+        "model.norm": "cuda:1",
+        "lm_head": 1,
+    }
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,
-        device_map='auto',
+        device_map=device_map,
         trust_remote_code=True
     )
 
@@ -172,8 +172,8 @@ def load_model(model_path):
     elif 'olmoe' in model_path.lower():
         model = get_olmoe(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
-    elif 'deepseek-v2-lite' in model_path.lower():
-        model, tokenizer = get_deepseek_v2_lite_gptq(model_path)
+    elif 'deepseek-v2-lite' in model_path.lower() or 'moonlight' in model_path.lower():
+        model, tokenizer = get_deepseek_v2_lite(model_path)
     elif 'llama' in model_path.lower():
         model = get_llama(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -209,6 +209,8 @@ if __name__ == '__main__':
         model, tokenizer = load_model(args.model)
 
         print("model: ", args.model)
+        # print(model)
+        # print(model.config)
         ppl = []
         datasets = ['wikitext2', 'c4-new']
         # datasets = ['wikitext2', ]

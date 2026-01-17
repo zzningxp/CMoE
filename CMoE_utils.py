@@ -535,16 +535,16 @@ def lowrank_compress_svd(weight_matrix, lowrank_sparsity, save_path=None):
     
     return low_rank_matrix.to(weight_matrix.dtype)
 
-def reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args):
+def reconstruct_moe(model, layer, inps, n_experts, n_activated, slice_expert_num, device, args):
+
+    from gptqutil import GPTQ, Quantizer, find_layers
 
     ori_expert_num = len(layer.mlp.experts)
     new_expert_num = ori_expert_num * slice_expert_num 
     scaling_factor = slice_expert_num
 
-    if if_quantized:
-        ori_router_gate = layer.mlp.gate.compressor.decompress_module(layer.mlp.gate)
-    else:
-        ori_router_gate = layer.mlp.gate.weight
+
+    ori_router_gate = layer.mlp.gate.weight
     new_router = nn.Linear(model.config.hidden_size, new_expert_num, dtype=ori_router_gate.dtype, bias=False).to(device)
     all_new_experts = nn.ModuleList()
 
@@ -552,18 +552,13 @@ def reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_e
     gate_start_idx = 0
 
     for expert_idx, expert in enumerate(layer.mlp.experts):
-        if if_quantized:
-            ori_gate_proj_weights = expert.gate_proj.compressor.decompress_module(expert.gate_proj)
-            ori_up_proj_weights = expert.up_proj.compressor.decompress_module(expert.up_proj)
-            ori_down_proj_weights = expert.down_proj.compressor.decompress_module(expert.down_proj)
-        else:
-            ori_gate_proj_weights = expert.gate_proj.weight
-            ori_up_proj_weights = expert.up_proj.weight
-            ori_down_proj_weights = expert.down_proj.weight
+        ori_gate_proj_weights = expert.gate_proj.weight
+        ori_up_proj_weights = expert.up_proj.weight
+        ori_down_proj_weights = expert.down_proj.weight
 
         # print(f"\nProcessing original expert {expert_idx} / {ori_expert_num}")
-        h = expert.act_fn(F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(ori_gate_proj_weights, p=2, dim=1)))
-        h = h * F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(ori_up_proj_weights, p=2, dim=1))
+        h = expert.act_fn(F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(ori_gate_proj_weights, p=2, dim=1)))
+        h = h * F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(ori_up_proj_weights, p=2, dim=1))
         expert_scores = h.to('cpu')
         
         analyze_sparsity = 0.1
@@ -594,13 +589,11 @@ def reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_e
                     down_proj_weights.append(ori_down_proj_weights[:, global_idx] * scaling_factor)
 
                 gate_proj_weights_t = torch.stack(gate_proj_weights).T
-                # expert_mlp.gate_proj.weight.data = lowrank_compress_svd(gate_proj_weights_t, r_neurons, save_path=f'plot/0_svd_gate_proj_{expert_idx}_{ii}.png').T
                 expert_mlp.gate_proj.weight.data = lowrank_compress_svd(gate_proj_weights_t, lowrank_sparsity).T
                 up_proj_weights_t = torch.stack(up_proj_weights).T
                 expert_mlp.up_proj.weight.data = lowrank_compress_svd(up_proj_weights_t, lowrank_sparsity).T
                 down_proj_weights = torch.stack(down_proj_weights, dim=1)
                 expert_mlp.down_proj.weight.data = lowrank_compress_svd(down_proj_weights, lowrank_sparsity)
-                # expert_mlp.down_proj.weight.data = down_proj_weights
 
             all_new_experts.append(expert_mlp)
             new_expert_intermediate_size = expert_mlp.up_proj.weight.shape[0]
@@ -622,6 +615,36 @@ def reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_e
     moe.top_k = n_activated
     moe.gate = new_router
     moe.experts = all_new_experts
+
+    gptq = {}
+    wbits = 4
+    groupsize = 128
+    act_order = False
+    static_groups = False
+    sym = False
+    qmodule = find_layers(moe, filters=['up_proj', 'gate_proj', 'down_proj'])
+    # print("Quant modules", qmodule.keys())
+
+    for name in qmodule.keys():
+        # print(name)
+        gptq[name] = GPTQ(qmodule[name])
+        gptq[name].quantizer = Quantizer()
+        gptq[name].quantizer.configure(wbits, perchannel=True, sym=sym, mse=False)
+    def add_batch(name):
+        def tmp(_, inp, out):
+            gptq[name].add_batch(inp[0].data, out.data)
+        return tmp
+    handles = []
+    for name in qmodule.keys():
+        handles.append(qmodule[name].register_forward_hook(add_batch(name)))
+    
+    moe(inps)
+
+    for handle in handles:
+        handle.remove()
+    for name in qmodule.keys():
+        gptq[name].fasterquant(groupsize=groupsize, actorder=act_order, static_groups=static_groups)
+        gptq[name].free()
 
     return moe
 
@@ -660,12 +683,7 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
     reconstruct_start_layer = args.reconstruct_start_layer
     reconstruct_end_layer = args.reconstruct_end_layer
     if layer_idx >= reconstruct_start_layer and layer_idx <= reconstruct_end_layer:
-        if_quantized = hasattr(layer.mlp.gate, 'quantization_status')
-        # print(layer_idx, if_quantized)
-        if if_quantized:
-            from compressed_tensors.quantization.quant_config import QuantizationStatus
-            if_quantized = layer.mlp.gate.quantization_status == QuantizationStatus.COMPRESSED
-        moe = reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_expert_num, if_quantized, device, args)
+        moe = reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
 
     if layer_idx >= reconstruct_start_layer and layer_idx <= reconstruct_end_layer:
         moe_out, _ = moe(hidden_states)
