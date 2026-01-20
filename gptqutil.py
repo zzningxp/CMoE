@@ -64,6 +64,8 @@ class Quantizer(nn.Module):
         else:
             x = x.flatten().unsqueeze(0)
 
+        assert x.numel() > 0, "Input tensor must have non-zero elements"
+
         tmp = torch.zeros(x.shape[0], device=dev)
         xmin = torch.minimum(x.min(1)[0], tmp)
         xmax = torch.maximum(x.max(1)[0], tmp)
@@ -78,15 +80,14 @@ class Quantizer(nn.Module):
         xmax[tmp] = +1
 
         if self.maxq < 0:
-          self.scale = xmax
-          self.zero = xmin
+            self.scale = xmax
+            self.zero = xmin
         else:
-          self.scale = (xmax - xmin) / self.maxq
-          if self.sym:
-              self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
-          else:
-              self.zero = torch.round(-xmin / self.scale)
-            #   self.zero = torch.round(-xmin / self.scale)
+            self.scale = (xmax - xmin) / self.maxq
+            if self.sym:
+                self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
+            else:
+                self.zero = torch.round(-xmin / self.scale)
 
         if self.mse:
             best = torch.full([x.shape[0]], float('inf'), device=dev)
@@ -193,8 +194,10 @@ class GPTQ:
         if static_groups:
             import copy
             groups = []
+            assert groupsize > 0
             for i in range(0, self.columns, groupsize):
                 quantizer = copy.deepcopy(self.quantizer)
+                assert i + groupsize <= self.columns
                 quantizer.find_params(W[:, i:(i + groupsize)], weight=True)
                 groups.append(quantizer)
 
@@ -232,11 +235,15 @@ class GPTQ:
                 if groupsize != -1:
                     if not static_groups:
                         if (i1 + i) % groupsize == 0:
-                            self.quantizer.find_params(W[:, (i1 + i):(i1 + i + groupsize)], weight=True)
+                            end_idx = min((i1 + i + groupsize), self.columns)
+                            self.quantizer.find_params(W[:, (i1 + i):end_idx], weight=True)
                     else:
                         idx = i1 + i
                         if actorder:
+                            assert idx < perm.numel()
                             idx = perm[idx]
+                        # print(idx, idx // groupsize)
+                        assert (idx // groupsize) < len(groups)
                         self.quantizer = groups[idx // groupsize]
 
                 q = quantize(
@@ -270,7 +277,7 @@ class GPTQ:
         # print(self.layer.weight.data.dtype)
         if DEBUG:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
-
+            
     def free(self):
         if DEBUG:
             self.inp1 = None

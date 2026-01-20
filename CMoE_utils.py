@@ -542,10 +542,14 @@ def reconstruct_moe(model, layer, inps, n_experts, n_activated, slice_expert_num
     new_expert_num = ori_expert_num * slice_expert_num 
     scaling_factor = slice_expert_num
 
+    model.config.intermediate_size = model.config.intermediate_size * slice_expert_num
+    model.config.num_experts = new_expert_num
+    model.config.num_experts_per_tok = n_activated
+
     ori_router_gate = layer.mlp.gate.weight
     # new_router = nn.Linear(model.config.hidden_size, new_expert_num, dtype=ori_router_gate.dtype, bias=False).to(device)
     new_router = layer.mlp.gate.__class__(model.config).to(device).to(layer.mlp.gate.weight.dtype)
-    print(new_router)
+    # print(new_router)
     all_new_experts = nn.ModuleList()
 
     total_neurons_processed = 0
@@ -588,12 +592,16 @@ def reconstruct_moe(model, layer, inps, n_experts, n_activated, slice_expert_num
                     up_proj_weights.append(ori_up_proj_weights[global_idx, :])
                     down_proj_weights.append(ori_down_proj_weights[:, global_idx] * scaling_factor)
 
-                gate_proj_weights_t = torch.stack(gate_proj_weights).T
-                expert_mlp.gate_proj.weight.data = lowrank_compress_svd(gate_proj_weights_t, lowrank_sparsity).T
-                up_proj_weights_t = torch.stack(up_proj_weights).T
-                expert_mlp.up_proj.weight.data = lowrank_compress_svd(up_proj_weights_t, lowrank_sparsity).T
-                down_proj_weights = torch.stack(down_proj_weights, dim=1)
-                expert_mlp.down_proj.weight.data = lowrank_compress_svd(down_proj_weights, lowrank_sparsity)
+                # gate_proj_weights_t = torch.stack(gate_proj_weights).T
+                # expert_mlp.gate_proj.weight.data = lowrank_compress_svd(gate_proj_weights_t, lowrank_sparsity).T
+                # up_proj_weights_t = torch.stack(up_proj_weights).T
+                # expert_mlp.up_proj.weight.data = lowrank_compress_svd(up_proj_weights_t, lowrank_sparsity).T
+                # down_proj_weights = torch.stack(down_proj_weights, dim=1)
+                # expert_mlp.down_proj.weight.data = lowrank_compress_svd(down_proj_weights, lowrank_sparsity)
+
+                expert_mlp.gate_proj.weight.data = torch.stack(gate_proj_weights)
+                expert_mlp.up_proj.weight.data = torch.stack(up_proj_weights)
+                expert_mlp.down_proj.weight.data = torch.stack(down_proj_weights, dim=1)
 
             all_new_experts.append(expert_mlp)
             new_expert_intermediate_size = expert_mlp.up_proj.weight.shape[0]
@@ -608,12 +616,7 @@ def reconstruct_moe(model, layer, inps, n_experts, n_activated, slice_expert_num
     if layer.mlp.shared_experts:
         shared_expert = layer.mlp.shared_experts
 
-    model.config.intermediate_size = all_new_experts[0].up_proj.weight.shape[0]
-    model.config.num_experts = new_expert_num
-    model.config.num_experts_per_tok = n_activated
-    # print(model.config.intermediate_size, model.config.num_experts, model.config.num_experts_per_tok)
-
-    moe = layer.mlp
+    moe = layer.mlp.__class__(model.config).to(device)
     moe.num_experts = len(all_new_experts)
     moe.top_k = n_activated
     moe.gate = new_router
@@ -627,7 +630,7 @@ def reconstruct_moe(model, layer, inps, n_experts, n_activated, slice_expert_num
 def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, n_experts, n_activated, n_shared, args):
 
     device = next(layer.parameters()).device
-    print(layer, device)
+    # print(layer, device)
 
     # Forward attention
     inp = inp.to(device)
@@ -664,8 +667,12 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
     else:
         slice_expert_num = 1
 
-    print(f"Quantize layer {layer_idx}")
-    if True:
+    # print(layer)
+    quant_layer = False
+    quant_attn = True
+
+    if quant_layer:
+        print(f"Quantize layer {layer_idx}")
         from gptqutil import GPTQ, Quantizer, find_layers
 
         gptq = {}
@@ -674,8 +681,11 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
         act_order = True
         static_groups = False
         sym = False
+        filters = ['up_proj', 'gate_proj', 'down_proj']
+        if quant_attn:
+            filters.extend(['q_proj', 'k_proj', 'v_proj', 'o_proj', 'kv_a_proj_with_mqa', 'kv_b_proj'])
 
-        for ff in ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'kv_a_proj_with_mqa', 'kv_b_proj', 'up_proj', 'gate_proj', 'down_proj']:
+        for ff in filters:
             qmodule = find_layers(layer, filters=[ff])
 
             print("Quant modules", ff, qmodule.keys())
