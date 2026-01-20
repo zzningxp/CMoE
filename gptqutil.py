@@ -143,7 +143,7 @@ class Quantizer(nn.Module):
 
 class GPTQ:
     def __init__(self, layer: nn.Linear):
-        assert isinstance(layer, nn.Linear)
+        assert isinstance(layer, nn.Linear) or isinstance(layer.weight, nn.Parameter)
         self.layer = layer
         self.dev = self.layer.weight.device
         # [N, K]
@@ -267,6 +267,7 @@ class GPTQ:
             Q = Q[:, invperm]
 
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
+        # print(self.layer.weight.data.dtype)
         if DEBUG:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
 
@@ -281,8 +282,11 @@ class GPTQ:
 
 # Find all layers of a certain type in a given module.
 def find_layers(module: nn.Module, filters: list[str]=[], layers=[nn.Linear], name=''):
-    if type(module) in layers and any([f in name for f in filters]):
-        return {name: module}
+    if any([f.split('.')[-1] == name.split('.')[-1] for f in filters]):
+        if type(module) in layers:
+            return {name: module}
+        if module.weight is not None and type(module.weight) == nn.Parameter:
+            return {name: module}
     res = {}
     for name1, child in module.named_children():
         res.update(find_layers(
