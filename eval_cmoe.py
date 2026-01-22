@@ -91,8 +91,8 @@ def get_llama(model):
     # torch.nn.init.normal_ = skip
     from transformers import LlamaForCausalLM
     model = LlamaForCausalLM.from_pretrained(model, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, device_map = 'auto')
-    model.seqlen = 2048
-    # model.seqlen = 4096
+    # model.seqlen = 2048
+    model.seqlen = 4096
     return model
 
 def get_llava(model):
@@ -105,7 +105,9 @@ def get_llava(model):
     from llava.model import LlavaLlamaForCausalLM
 
     model = LlavaLlamaForCausalLM.from_pretrained(model, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, device_map = 'auto')
-    model.seqlen = 2048
+    # model.seqlen = 2048
+    model.seqlen = 4096
+
     return model
 
 def get_olmoe(model_path):
@@ -120,7 +122,8 @@ def get_olmoe(model_path):
         device_map = "auto"
     )
 
-    model.seqlen = 2048
+    # model.seqlen = 2048
+    model.seqlen = 4096
     return model
 
 def get_deepseek_v2_lite(model_path):
@@ -137,7 +140,8 @@ def get_deepseek_v2_lite(model_path):
         trust_remote_code=True
     )
 
-    model.seqlen = 2048
+    # model.seqlen = 2048
+    model.seqlen = 4096
 
     return model, tokenizer
 
@@ -157,7 +161,8 @@ def get_auto(model_path):
         trust_remote_code=True
     )
 
-    model.seqlen = 2048
+    # model.seqlen = 2048
+    model.seqlen = 4096
 
     return model, tokenizer
 

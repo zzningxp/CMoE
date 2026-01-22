@@ -23,6 +23,7 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
     inps = torch.zeros(
         (args.nsamples//bsz, bsz, model.seqlen, model.config.hidden_size), dtype=dtype, device='cpu'
     )
+    print(inps.shape)
     cache = {'i': 0, 'attention_mask': None, 'position_ids': None, 'position_embeddings': None}
 
     class Catcher(nn.Module):
@@ -50,9 +51,6 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
 
     torch.cuda.empty_cache()
 
-    outs = torch.zeros_like(inps)
-    moe_outs = torch.zeros_like(inps)
-    
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
     position_embeddings = cache['position_embeddings']
@@ -63,12 +61,7 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
     # model.cuda()
     # layers.cuda()
 
-    inp = copy.deepcopy(inps[0])
-
-    # Check if the layer is already a MoE layer
-  
     # MoE Carving
-    carve_inp = copy.deepcopy(inp)
     moe_model_flag = False
     for layer in layers:
         moe_model_flag = moe_model_flag or hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts')
@@ -93,11 +86,13 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
         print("The model is a dense model. Proceeding to carve MoE layers. ")
         slice_expert_num = 1
 
+    inps = inps.squeeze(1)
+
     for layer_idx, layer in tqdm(enumerate(layers), desc = 'Carving MoE layers...'):
         if moe_model_flag:
             moe_out = construct_moe_from_existing(model, layer, 
                 layer_idx,
-                carve_inp, 
+                inps, 
                 attention_mask, 
                 position_ids,
                 position_embeddings,
@@ -110,7 +105,7 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
         else:
             moe_out = construct_moe(model, layer, 
                 layer_idx,
-                carve_inp, 
+                inps, 
                 attention_mask, 
                 position_ids,
                 position_embeddings,

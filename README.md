@@ -1,35 +1,33 @@
-# CMoE
-
-Implementation for the paper [CMoE: Fast Carving of Mixture-of-Experts for Efficient LLM Inference](https://arxiv.org/abs/2502.04416). 
+# MoE
 
 ## Dependencies
 
 ```bash
 conda create -n cmoe python=3.11
 conda activate cmoe
-conda install pytorch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 pytorch-cuda=12.8 -c pytorch -c nvidia
+conda install pytorch==2.8.0+cu128 torchvision==0.23.0+cu128 torchaudio==2.8.0+cu128 pytorch-cuda=12.8 -c pytorch -c nvidia
 pip install datasets==4.4.1
-pip install transformers==4.57.3
-pip install accelerate==1.2.1
+pip install transformers==4.57.5
+pip install accelerate==1.12.0
 pip install sentencepiece==0.2.0
-pip install protobuf==5.29.2
+pip install protobuf==6.33.3
 pip install matplotlib==3.10.0
 pip install lap==0.5.12
 pip install peft==0.14.0
 ```
 Note: please modify the version of some packages for your own environment.
 
-## Quick Start
+## Supported Models
 
-Download the models from [Huggingface](https://huggingface.co/), then the you can run the code run_cmoe.py. Set model path as 'MODEL_PATH'.
+OLMoE / Deepseek(v1)-MoE-16B0-base / Deepseek-v2-lite(16B-A3B)
+
+## Quick Start
 
 You can run the pre-defined testing script 'run.sh' by:
 ```bash
 bash run.sh
 ```
 
-Or resetting the hyperparameters to run customized setting.
-For example, run S2A2E16 with 2,048 fine-tuning data on wikitext2:
 ```python
 python run_cmoe.py $MODEL_PATH wikitext2 \ 
 --nshared 2 \
@@ -41,18 +39,23 @@ python run_cmoe.py $MODEL_PATH wikitext2 \
 
 ## Evaluation
 
-Our code automatically run ppl eval.
-If you want to do evaluation on downstream tasks, you can add the arg `--eval-zero`, where the code is implemented by [Wanda](https://github.com/locuslab/wanda).
+bash run.sh
+```
+
+```python
+python eval_cmoe.py $MODEL_PATH 
+```
+
+## Code sources
+
+Framework code is referenced from: https://github.com/JarvisPei/CMoE
+GPTQ code is referenced from: https://github.com/cat538/MxMoE
+Important code is inspired from: https://github.com/xuyuzhuang11/CAMERA
 
 ## Cite
 
 If you found this work useful, please consider citing:
 
 ```
-@article{pei2025cmoe,
-  title={CMoE: Fast Carving of Mixture-of-Experts for Efficient LLM Inference},
-  author={Pei, Zehua and Zou, Lancheng and Zhen, Hui-Ling and Yu, Xianzhi and Liu, Wulong and Pan, Sinno Jialin and Yuan, Mingxuan and Yu, Bei},
-  journal={arXiv preprint arXiv:2502.04416},
-  year={2025}
-}
+
 ```

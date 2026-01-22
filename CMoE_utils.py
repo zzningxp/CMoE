@@ -13,6 +13,8 @@ import re
 import time
 
 from CMoE_model import *
+from gptqutil import GPTQ, Quantizer, find_layers
+
 
 DEV = torch.device('cuda:0')
 
@@ -535,7 +537,7 @@ def lowrank_compress_svd(weight_matrix, lowrank_sparsity, save_path=None):
     
     return low_rank_matrix.to(weight_matrix.dtype)
 
-def reconstruct_moe(model, layer, inps, n_experts, n_activated, slice_expert_num, device, args):
+def reconstruct_moe(model, layer, layer_idx, inps, n_experts, n_activated, slice_expert_num, device, args):
 
     ori_expert_num = len(layer.mlp.experts)
     new_expert_num = ori_expert_num * slice_expert_num 
@@ -600,7 +602,7 @@ def reconstruct_moe(model, layer, inps, n_experts, n_activated, slice_expert_num
         gate_start_idx += slice_expert_num
 
         tick1 = time.time()
-        # print(f"Expert {expert_idx} re-sort time cost: {tick1 - tick0}")
+        print(f"Layer {layer_idx}, Expert {expert_idx} re-sort time cost: {tick1 - tick0}")
 
     moe = layer.mlp.__class__(model.config).to(device)
     moe.num_experts = len(all_new_experts)
@@ -618,6 +620,7 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
 
     device = next(layer.parameters()).device
     # print(layer, device)
+    print(inp.shape)
 
     # Forward attention
     inp = inp.to(device)
@@ -643,9 +646,11 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
     hidden_states = residual + hidden_states
     residual = hidden_states
     hidden_states = layer.post_attention_layernorm(hidden_states)
+
+    print(hidden_states.shape)
     
     if hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts'):        
-        moe = reconstruct_moe(model, layer, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
+        moe = reconstruct_moe(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
         layer.mlp = moe        
 
     # print(layer)
@@ -654,7 +659,6 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
 
     if quant_layer:
         print(f"Quantize layer {layer_idx}")
-        from gptqutil import GPTQ, Quantizer, find_layers
 
         gptq = {}
         wbits = 4
@@ -672,9 +676,13 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
         for ff in filters:
             qmodule_all = find_layers(layer, filters=[ff])
             qbatch = 32
+
             for qmi in range(0, len(qmodule_all.keys()), qbatch):
+                tick0 = time.time()   
+
                 qmodule = {k: qmodule_all[k] for k in list(qmodule_all.keys())[qmi: qmi + qbatch]}
-                print("Quant modules", ff, qmodule.keys())
+                # print("Quant modules", ff, qmodule.keys())
+                # print("Quant modules", ff, qmi)
                 if len(qmodule.keys()) == 0:
                     continue
                 for name in qmodule.keys():
@@ -682,29 +690,34 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
                     gptq[name].quantizer = Quantizer()
 
                     if name.split('.')[-1] in attn_filters:
-                        gptq[name].quantizer.configure(8, perchannel=True, sym=sym, mse=False)
+                        bit = [8]
+                        gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                     else:
                         match = re.search(r'mlp\.experts\.(\d+)', name)
                         expert_id = int(match.group(1)) if match else -1  ## shared expert id is -1
                         if expert_id == -1:
-                            gptq[name].quantizer.configure(4, perchannel=True, sym=sym, mse=False)
+                            bit = [4]
+                            gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                         else:
                             if slice_expert_num == 1:
-                                gptq[name].quantizer.configure(4, perchannel=True, sym=sym, mse=False)
+                                bit = [2]
+                                gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                             elif slice_expert_num == 2:
+                                bit = [2, 2]
                                 if expert_id % 2 == 0:
-                                    gptq[name].quantizer.configure(4, perchannel=True, sym=sym, mse=False)
+                                    gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                                 elif expert_id % 2 == 1:
-                                    gptq[name].quantizer.configure(3, perchannel=True, sym=sym, mse=False)
+                                    gptq[name].quantizer.configure(bit[1], perchannel=True, sym=sym, mse=False)
                             elif slice_expert_num == 4:
+                                bit = [3, 2, 2, 1]
                                 if expert_id % 4 == 0:
-                                    gptq[name].quantizer.configure(3, perchannel=True, sym=sym, mse=False)
+                                    gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                                 elif expert_id % 4 == 1:
-                                    gptq[name].quantizer.configure(2, perchannel=True, sym=sym, mse=False)
+                                    gptq[name].quantizer.configure(bit[1], perchannel=True, sym=sym, mse=False)
                                 elif expert_id % 4 == 2:
-                                    gptq[name].quantizer.configure(2, perchannel=True, sym=sym, mse=False)
+                                    gptq[name].quantizer.configure(bit[2], perchannel=True, sym=sym, mse=False)
                                 elif expert_id % 4 == 3:
-                                    gptq[name].quantizer.configure(1, perchannel=True, sym=sym, mse=False)
+                                    gptq[name].quantizer.configure(bit[3], perchannel=True, sym=sym, mse=False)
                 def add_batch(name):
                     def tmp(_, inp, out):
                         gptq[name].add_batch(inp[0].data, out.data)
@@ -732,7 +745,10 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
                 for name in qmodule.keys():
                     gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups)
                     gptq[name].free()
-            
+                
+                tick1 = time.time()
+                print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0}")
+
             del qmodule_all
         
     return_router_info = 'olmoe' in args.model.lower()
