@@ -84,36 +84,26 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
         print(f"Slice expert by : {slice_expert_num} to {args.nexperts}, with {args.nactivated} activated experts.")
     else:
         print("The model is a dense model. Proceeding to carve MoE layers. ")
-        slice_expert_num = 1
+        slice_expert_num = args.nexperts
 
     inps = inps.squeeze(1)
 
     for layer_idx, layer in tqdm(enumerate(layers), desc = 'Carving MoE layers...'):
-        if moe_model_flag:
-            moe_out = construct_moe_from_existing(model, layer, 
-                layer_idx,
-                inps, 
-                attention_mask, 
-                position_ids,
-                position_embeddings,
-                n_experts = args.nexperts,
-                n_activated = args.nactivated,
-                slice_expert_num = slice_expert_num,
-                n_shared = args.nshared,
-                args = args
-            )
-        else:
-            moe_out = construct_moe(model, layer, 
-                layer_idx,
-                inps, 
-                attention_mask, 
-                position_ids,
-                position_embeddings,
-                n_experts = args.nexperts,
-                n_activated = args.nactivated,
-                n_shared = args.nshared,
-                args = args
-            )
+        moe_out = construct_moe(model, 
+            moe_model_flag,
+            layer, 
+            layer_idx,
+            inps, 
+            attention_mask, 
+            position_ids,
+            position_embeddings,
+            n_experts = args.nexperts,
+            n_activated = args.nactivated,
+            slice_expert_num = slice_expert_num,
+            n_shared = args.nshared,
+            args = args
+        )
+
         inps = moe_out
         gc.collect()
         torch.cuda.empty_cache()

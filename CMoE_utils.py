@@ -286,100 +286,6 @@ def construct_experts_k_means(
     
     return expert_groups, representative_indices
 
-
-@torch.no_grad()
-def construct_moe(model, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, n_experts, n_activated, n_shared, args):
-
-    device = next(layer.parameters()).device
-    
-    # Forward attention
-    inp = inp.to(device)
-    if attention_mask is not None:
-        attention_mask = attention_mask.to(device)
-    
-    if position_ids is not None:
-        position_ids = position_ids.to(device)
-    
-    # if position_embeddings is not None:
-    #     position_embeddings = position_embeddings.to(device)
-
-    residual = inp
-    hidden_states = layer.input_layernorm(inp)
-    hidden_states = layer.self_attn(
-        hidden_states=hidden_states, 
-        attention_mask=attention_mask, 
-        position_ids=position_ids,
-        position_embeddings=position_embeddings)[0]
-    hidden_states = residual + hidden_states
-    residual = hidden_states
-    hidden_states = layer.post_attention_layernorm(hidden_states)
-
-    # Forward FFN, normalize FFN input and weights to compute normalized h
-    h_pre = hidden_states
-    h = layer.mlp.act_fn(F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(layer.mlp.gate_proj.weight, p=2, dim=1)))
-    h = h * F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(layer.mlp.up_proj.weight, p=2, dim=1))
-
-    scores_all = h.to('cpu')
-
-    # Calculate activation markers, activation rates
-    # print(scores_all.shape)
-    counts, rates, markers = analyze_neuron_activations(scores_all)
-    # counts, rates, markers = analyze_neuron_activations(scores_all, save_path=f'./plot/scores_analysis_{layer.self_attn.layer_idx}.png')
-
-    # 可视化激活率
-    # plot_activation_rates(counts, rates, save_path=f'./plot/activation_rates_{layer.self_attn.layer_idx}.png')
-    
-    # Construct shared and routed experts
-    expert_groups, representative_indices = construct_experts_k_means(
-        rates,
-        markers,
-        num_experts = n_experts,
-        num_shared_experts = n_shared,
-    )
-
-    # print(n_experts, n_shared, n_activated, len(expert_groups), len(representative_indices), len(rates))
-    # for i, group in enumerate(expert_groups):
-    #     print(f"Expert {i}: {len(group)} neurons")
-    # for i, idx in enumerate(representative_indices):
-    #     print(f"Representative neuron for Expert {i+1}: Index {idx})")
-
-    experts = nn.ModuleList()
-    for expert_indices in expert_groups:
-        expert_mlp = LlamaMLP(layer.mlp.hidden_size, len(expert_indices)).to('cpu')
-        
-        # Initialize weights from the corresponding neurons in original projections
-        with torch.no_grad():
-            expert_mlp.gate_proj.weight.data = layer.mlp.gate_proj.weight.data[expert_indices, :]
-            expert_mlp.up_proj.weight.data = layer.mlp.up_proj.weight.data[expert_indices, :]
-            expert_mlp.down_proj.weight.data = layer.mlp.down_proj.weight.data[:, expert_indices]
-        
-        experts.append(expert_mlp)
-
-    
-    # Router
-    router = Router(layer.mlp.hidden_size, n_experts-n_shared, n_activated, bias_speed = args.bias_speed)
-
-    core_neurons = representative_indices
-    core_weights = layer.mlp.up_proj.weight.data[core_neurons, :]
-    core_gate_weights = layer.mlp.gate_proj.weight.data[core_neurons, :]
-    router.classifier.weight.data = F.normalize(core_weights, p=2, dim=1)
-    router.gate.weight.data = F.normalize(core_gate_weights, p=2, dim=1)
-
-    # MoE
-    moe = MoE(layer.mlp.hidden_size, layer.mlp.intermediate_size//n_experts, n_experts, n_shared, n_activated)
-    moe.gate = router
-    moe.experts = experts[1:]
-    moe.shared_experts = experts[0]
-    moe.cus_training = False
-    moe_out = moe(h_pre) + residual
-
-    layer.mlp = moe
-
-    del h, h_pre, scores_all, residual, hidden_states, 
-
-    return moe_out
-
-
 def construct_experts_by_rates(
     activation_rates,
     num_experts,
@@ -540,7 +446,58 @@ def lowrank_compress_svd(weight_matrix, lowrank_sparsity, save_path=None):
     
     return low_rank_matrix.to(weight_matrix.dtype)
 
-def reconstruct_moe(model, layer, layer_idx, inps, n_experts, n_activated, slice_expert_num, device, args):
+@torch.no_grad()
+def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activated, slice_expert_num, device, args):
+
+    h = layer.mlp.act_fn(F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(layer.mlp.gate_proj.weight, p=2, dim=1)))
+    h = h * F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(layer.mlp.up_proj.weight, p=2, dim=1))
+    expert_scores = h.to('cpu')
+
+    analyze_sparsity = 0.1
+    rates = analyze_neuron_activations(expert_scores, sparsity=analyze_sparsity)
+
+    expert_groups, representative_indices = construct_experts_by_rates(
+        rates,
+        num_experts = slice_expert_num,
+        num_shared_experts = 0,
+    )
+    
+    experts = nn.ModuleList()
+    total_neurons_processed = 0
+    scaling_factor = slice_expert_num
+
+    new_intermediate_size = layer.mlp.intermediate_size // slice_expert_num
+    expert_groups = expert_groups[1:]
+    for ii, group_indices in enumerate(expert_groups):
+        expert_mlp = LlamaMLP(layer.mlp.hidden_size, new_intermediate_size)
+
+        with torch.no_grad():
+            group_indices_tensor = torch.tensor(group_indices, dtype=torch.long, device=device)
+            
+            expert_mlp.gate_proj.weight.data = layer.mlp.gate_proj.weight[group_indices_tensor, :]
+            expert_mlp.up_proj.weight.data = layer.mlp.up_proj.weight[group_indices_tensor, :]
+            expert_mlp.down_proj.weight.data = layer.mlp.down_proj.weight[:, group_indices_tensor] * scaling_factor
+            
+        experts.append(expert_mlp)
+        new_expert_intermediate_size = expert_mlp.up_proj.weight.shape[0]
+        total_neurons_processed += new_expert_intermediate_size
+        print(ii, scaling_factor, new_expert_intermediate_size, expert_mlp.gate_proj.weight.shape, expert_mlp.up_proj.weight.shape, expert_mlp.down_proj.weight.shape)
+    
+    router = Router(layer.mlp.hidden_size, slice_expert_num, n_activated).to(device)
+    router.gate.weight.data = torch.ones(slice_expert_num, layer.mlp.hidden_size).to(torch.bfloat16).to(device)
+    router.classifier = None
+    # init router gate to 1，and make all experts are activated
+
+    # MoE
+    moe = MoE(layer.mlp.hidden_size, new_intermediate_size, slice_expert_num, 0, n_activated).to(device)
+    moe.gate = router
+    moe.experts = experts
+    moe.shared_experts = None
+
+    return moe
+
+@torch.no_grad()
+def reconstruct_moe_from_existing(model, layer, layer_idx, inps, n_experts, n_activated, slice_expert_num, device, args):
 
     ori_expert_num = len(layer.mlp.experts)
     new_expert_num = ori_expert_num * slice_expert_num 
@@ -669,20 +626,11 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                             gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                         elif slice_expert_num == 2:
                             bit = [2, 2]
-                            if expert_id % 2 == 0:
-                                gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
-                            elif expert_id % 2 == 1:
-                                gptq[name].quantizer.configure(bit[1], perchannel=True, sym=sym, mse=False)
+                            gptq[name].quantizer.configure(bit[expert_id % slice_expert_num], perchannel=True, sym=sym, mse=False)
                         elif slice_expert_num == 4:
+                            # bit = [8, 8, 8, 8]
                             bit = [3, 2, 2, 1]
-                            if expert_id % 4 == 0:
-                                gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
-                            elif expert_id % 4 == 1:
-                                gptq[name].quantizer.configure(bit[1], perchannel=True, sym=sym, mse=False)
-                            elif expert_id % 4 == 2:
-                                gptq[name].quantizer.configure(bit[2], perchannel=True, sym=sym, mse=False)
-                            elif expert_id % 4 == 3:
-                                gptq[name].quantizer.configure(bit[3], perchannel=True, sym=sym, mse=False)
+                            gptq[name].quantizer.configure(bit[expert_id % slice_expert_num], perchannel=True, sym=sym, mse=False)
             def add_batch(name):
                 def tmp(_, inp, out):
                     gptq[name].add_batch(inp[0].data, out.data)
@@ -724,7 +672,7 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
         del qmodule_all
 
 @torch.no_grad()
-def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
+def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
                                 n_experts, n_activated, slice_expert_num, n_shared, args):
 
     device = next(layer.parameters()).device
@@ -758,11 +706,16 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
 
     # print(hidden_states.shape)
     
-    if hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts'):        
-        moe = reconstruct_moe(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
+    if moe_model_flag:
+        if hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts'):        
+            moe = reconstruct_moe_from_existing(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
+            layer.mlp = moe
+    else:
+        moe = reconstruct_moe_from_dense(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
         layer.mlp = moe
-        gc.collect()
-        torch.cuda.empty_cache()
+    
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # print(layer)
     if_quant_layer = True
