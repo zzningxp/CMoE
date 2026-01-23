@@ -30,7 +30,7 @@ def analyze_neuron_activations(scores: torch.Tensor, save_path: Optional[str] = 
 
     flat_states = scores.reshape(-1, inter_size)
     activation_markers = torch.zeros_like(flat_states)
-    activation_values = torch.zeros_like(flat_states)
+    # activation_values = torch.zeros_like(flat_states)
     
     for i in range(total_samples):
         sample_values = flat_states[i]
@@ -44,7 +44,7 @@ def analyze_neuron_activations(scores: torch.Tensor, save_path: Optional[str] = 
 
     # Sum up activations across all samples
     activation_counts = activation_markers.sum(dim=0)
-    activation_values = activation_values.sum(dim=0)
+    # activation_values = activation_values.sum(dim=0)
     activation_rates = activation_counts / total_samples
 
     if save_path:
@@ -421,6 +421,8 @@ def reconstruct_moe_harddrop(model, layer, hidden_states, n_experts, n_activated
 
     total_neurons_processed = 0
     gate_start_idx = 0
+    calib_size = 8
+    calib_hidden_states = hidden_states[:8]
 
     for expert_idx, expert in enumerate(layer.mlp.experts):
         if if_quantized:
@@ -659,7 +661,7 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                     match = re.search(r'mlp\.experts\.(\d+)', name)
                     expert_id = int(match.group(1)) if match else -1  ## shared expert id is -1
                     if expert_id == -1:
-                        bit = [4]
+                        bit = [2]
                         gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                     else:
                         if slice_expert_num == 1:
@@ -727,7 +729,7 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
 
     device = next(layer.parameters()).device
     # print(layer, device)
-    print(inp.shape)
+    # print(inp.shape)
 
     # Forward attention
     inp = inp.to(device)
@@ -754,7 +756,7 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
     residual = hidden_states
     hidden_states = layer.post_attention_layernorm(hidden_states)
 
-    print(hidden_states.shape)
+    # print(hidden_states.shape)
     
     if hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts'):        
         moe = reconstruct_moe(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
@@ -774,11 +776,17 @@ def construct_moe_from_existing(model, layer, layer_idx, inp, attention_mask, po
         torch.cuda.empty_cache()
     
     print(hidden_states.shape)
+    tick0 = time.time()
     return_router_info = 'olmoe' in args.model.lower()
-    if return_router_info:
-        moe_out, _ = layer.mlp(hidden_states)
-    else:
-        moe_out = layer.mlp(hidden_states)
+    moe_out = torch.zeros_like(hidden_states)
+    mlp_bs = 4
+    for batch_idx in range(0, hidden_states.shape[0], mlp_bs):
+        if return_router_info:
+            moe_out[batch_idx:batch_idx+mlp_bs], _ = layer.mlp(hidden_states[batch_idx:batch_idx+mlp_bs])
+        else:
+            moe_out[batch_idx:batch_idx+mlp_bs] = layer.mlp(hidden_states[batch_idx:batch_idx+mlp_bs])
+    tick1 = time.time()
+    print(f"Inference in new moe layer {layer_idx} with batch size {mlp_bs} time: {tick1 - tick0}")
 
     moe_out = moe_out + residual
     # print("moe_out")

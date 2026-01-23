@@ -49,7 +49,9 @@ python eval_cmoe.py $MODEL_PATH
 ## Code sources
 
 Framework code is referenced from: https://github.com/JarvisPei/CMoE
+
 GPTQ code is referenced from: https://github.com/cat538/MxMoE
+
 Important code is inspired from: https://github.com/xuyuzhuang11/CAMERA
 
 ## Cite
