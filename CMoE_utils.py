@@ -675,6 +675,9 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
 def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
                                 n_experts, n_activated, slice_expert_num, n_shared, args):
 
+    olmoe_model = 'olmoe' in args.model.lower()
+    batchsize = inp.shape[0]
+
     device = next(layer.parameters()).device
     # print(layer, device)
     # print(inp.shape)
@@ -689,18 +692,25 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     
     residual = inp
     hidden_states_inorm = layer.input_layernorm(inp)
-    try:
-        hidden_states = layer.self_attn(
-            hidden_states=hidden_states_inorm, 
-            attention_mask=attention_mask, 
-            position_ids=position_ids,
-            position_embeddings=position_embeddings)[0]
-    except:
-        hidden_states = layer.self_attn(
-            hidden_states=hidden_states_inorm,
-            attention_mask=attention_mask, 
-            position_ids=position_ids)[0]
-    hidden_states = residual + hidden_states
+
+    tick0 = time.time()
+    attn_out = torch.zeros_like(hidden_states_inorm)
+    for b_i in range(0, batchsize):
+        if olmoe_model:
+            attn_out[b_i:b_i+1] = layer.self_attn(
+                hidden_states=hidden_states_inorm[b_i:b_i+1],
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                position_embeddings=position_embeddings)[0]
+        else:
+            attn_out[b_i:b_i+1] = layer.self_attn(
+                hidden_states=hidden_states_inorm[b_i:b_i+1],
+                attention_mask=attention_mask, 
+                position_ids=position_ids)[0]
+    tick1 = time.time()
+    print(f"Inference in origin attention layer {layer_idx} with batch size {batchsize} time: {tick1 - tick0}")
+
+    hidden_states = residual + attn_out
     residual = hidden_states
     hidden_states = layer.post_attention_layernorm(hidden_states)
 
@@ -730,16 +740,14 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     
     print(hidden_states.shape)
     tick0 = time.time()
-    return_router_info = 'olmoe' in args.model.lower()
     moe_out = torch.zeros_like(hidden_states)
-    mlp_bs = 4
-    for batch_idx in range(0, hidden_states.shape[0], mlp_bs):
-        if return_router_info:
-            moe_out[batch_idx:batch_idx+mlp_bs], _ = layer.mlp(hidden_states[batch_idx:batch_idx+mlp_bs])
+    for b_i in range(0, batchsize):
+        if olmoe_model:
+            moe_out[b_i:b_i+1], _ = layer.mlp(hidden_states[b_i:b_i+1])
         else:
-            moe_out[batch_idx:batch_idx+mlp_bs] = layer.mlp(hidden_states[batch_idx:batch_idx+mlp_bs])
+            moe_out[b_i:b_i+1] = layer.mlp(hidden_states[b_i:b_i+1])
     tick1 = time.time()
-    print(f"Inference in new moe layer {layer_idx} with batch size {mlp_bs} time: {tick1 - tick0}")
+    print(f"Inference in new moe layer {layer_idx} with batch size {batchsize} time: {tick1 - tick0}")
 
     moe_out = moe_out + residual
     # print("moe_out")
