@@ -128,5 +128,5 @@ if __name__ == '__main__':
     rt_construct = tick_1 - tick
     extra_time = tick_2 - tick_1
     rt = time.time() - tick - extra_time
-    print("Runtime of training-free construction: ", rt_construct)
-    print("Runtime of fine-tuning construction: ", rt)
+    print(f"Runtime of training-free construction: {rt_construct:.2f}")
+    print(f"Runtime of fine-tuning construction: {rt:.2f}")

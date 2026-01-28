@@ -78,7 +78,7 @@ def cmoe_ppl_eval(model, testloader, eval_set, args):
     
     # print(nlls)
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
-    print(f'ppl: {ppl.item():.4f}')
+    print(f'ppl on {eval_set}: {ppl.item():.4f}')
     model.config.use_cache = use_cache
 
     return ppl.item()
@@ -145,6 +145,22 @@ def get_deepseek_v2_lite(model_path):
 
     return model, tokenizer
 
+def get_qwen3(model_path):
+    from transformers import Qwen3ForCausalLM
+
+    model = Qwen3ForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        device_map='auto',
+        trust_remote_code=True
+    )
+
+    model.seqlen = 2048
+    # model.seqlen = 4096
+
+    return model
+
 def get_auto(model_path):
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -177,6 +193,9 @@ def load_model(model_path):
         model, tokenizer = get_deepseek_v2_lite(model_path)
     elif 'llama' in model_path.lower():
         model = get_llama(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+    elif 'qwen3' in model_path.lower():
+        model = get_qwen3(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
     else:
         model, tokenizer = get_auto(model_path)

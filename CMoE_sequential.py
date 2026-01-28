@@ -38,6 +38,12 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
             cache['position_ids'] = kwargs['position_ids']
             cache['position_embeddings'] = kwargs.get('position_embeddings')
             raise ValueError
+        def __getattr__(self, name):
+            try:
+                return super().__getattr__(name)
+            except AttributeError:
+                return getattr(self.module, name)
+
     layers[0] = Catcher(layers[0])
     
     with torch.no_grad():

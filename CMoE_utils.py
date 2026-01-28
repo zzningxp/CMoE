@@ -687,6 +687,8 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
 
     olmoe_model = 'olmoe' in args.model.lower()
     llama_model = 'llama' in args.model.lower()
+    qwen3_model = 'qwen3' in args.model.lower()
+    
     batchsize = inp.shape[0]
 
     device = next(layer.parameters()).device
@@ -707,7 +709,7 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     tick0 = time.time()
     attn_out = torch.zeros_like(hidden_states_inorm)
     for b_i in range(0, batchsize):
-        if olmoe_model or llama_model:
+        if olmoe_model or llama_model or qwen3_model:
             attn_out[b_i:b_i+1] = layer.self_attn(
                 hidden_states=hidden_states_inorm[b_i:b_i+1],
                 attention_mask=attention_mask,
