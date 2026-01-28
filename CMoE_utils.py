@@ -14,7 +14,7 @@ import time
 import gc
 
 from CMoE_model import *
-from gptqutil import GPTQ, Quantizer, find_layers
+from gptq_utils import GPTQ, Quantizer, find_layers
 
 
 DEV = torch.device('cuda:0')
@@ -688,7 +688,7 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     olmoe_model = 'olmoe' in args.model.lower()
     llama_model = 'llama' in args.model.lower()
     qwen3_model = 'qwen3' in args.model.lower()
-    
+
     batchsize = inp.shape[0]
 
     device = next(layer.parameters()).device
@@ -729,6 +729,7 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
 
     # print(hidden_states.shape)
     
+    if_sorted_by_activation = True
     if moe_model_flag:
         if hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts'):        
             moe = reconstruct_moe_from_existing(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)

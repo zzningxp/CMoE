@@ -270,6 +270,8 @@ class GPTQ:
 
         torch.cuda.synchronize()
         # print(f"Time {time.time() - tick:.2f}; Name: {name}; maxq: {self.quantizer.maxq}; Error: {torch.sum(Losses).item()}")
+        # row_sum = torch.sum(Losses, dim=1)
+        # print(row_sum.shape, row_sum)
 
         if actorder:
             Q = Q[:, invperm]
