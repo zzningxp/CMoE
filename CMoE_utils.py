@@ -287,15 +287,16 @@ def construct_experts_k_means(
     return expert_groups, representative_indices
 
 def construct_experts_by_rates(
-    activation_rates,
+    origin_rates,
     num_experts,
     num_shared_experts):
 
-    hidden_size = activation_rates.shape[0]
+    print("origin_rates:", origin_rates.shape)
+    hidden_size = origin_rates.shape[0]
     neurons_per_expert = hidden_size // num_experts
 
     expert_groups = []
-    rates = activation_rates.float()
+    rates = origin_rates.float()
     # markers = activation_markers.float()
 
     expert_groups.append([])
@@ -449,12 +450,15 @@ def lowrank_compress_svd(weight_matrix, lowrank_sparsity, save_path=None):
 @torch.no_grad()
 def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activated, slice_expert_num, device, args):
 
-    h = layer.mlp.act_fn(F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(layer.mlp.gate_proj.weight, p=2, dim=1)))
-    h = h * F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(layer.mlp.up_proj.weight, p=2, dim=1))
-    expert_scores = h.to('cpu')
+    # h = layer.mlp.act_fn(F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(layer.mlp.gate_proj.weight, p=2, dim=1)))
+    # h = h * F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(layer.mlp.up_proj.weight, p=2, dim=1))
 
-    analyze_sparsity = 0.1
-    rates = analyze_neuron_activations(expert_scores, sparsity=analyze_sparsity)
+    # analyze_sparsity = 0.1
+    # rates = analyze_neuron_activations(h, sparsity=analyze_sparsity)
+    
+    rates = analyze_quant_outlier(layer, layer_idx, inps, n_experts, True, f"plot/_quant_outlier_{layer_idx}.png")
+    # rates = torch.randn(layer.mlp.intermediate_size, device=device)
+    # rates = torch.arange(layer.mlp.intermediate_size, device=device)
 
     expert_groups, representative_indices = construct_experts_by_rates(
         rates,
@@ -481,7 +485,7 @@ def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activ
         experts.append(expert_mlp)
         new_expert_intermediate_size = expert_mlp.up_proj.weight.shape[0]
         total_neurons_processed += new_expert_intermediate_size
-        print(ii, scaling_factor, new_expert_intermediate_size, expert_mlp.gate_proj.weight.shape, expert_mlp.up_proj.weight.shape, expert_mlp.down_proj.weight.shape)
+        # print(ii, scaling_factor, new_expert_intermediate_size, expert_mlp.gate_proj.weight.shape, expert_mlp.up_proj.weight.shape, expert_mlp.down_proj.weight.shape)
     
     router = Router(layer.mlp.hidden_size, slice_expert_num, n_activated).to(device)
     router.gate.weight.data = torch.ones(slice_expert_num, layer.mlp.hidden_size).to(torch.bfloat16).to(device)
@@ -574,6 +578,108 @@ def reconstruct_moe_from_existing(model, layer, layer_idx, inps, n_experts, n_ac
 
     return moe
 
+def analyze_quant_outlier(layer, layer_idx, hidden_states, n_experts, if_dense=True, save_path=None):
+    print(f"reconstruct moe from dense layer {layer_idx}")
+    nsample = hidden_states.shape[0]
+
+    gptq = {}
+    wbits = 8
+    groupsize = 128
+    act_order = True
+    static_groups = False
+    filters = ['up_proj', 'gate_proj', 'down_proj']
+    loss = {}
+    
+    for ff in filters:
+        qmodule_all = find_layers(layer, filters=[ff])
+        qbatch = 64
+
+        for qmi in range(0, len(qmodule_all.keys()), qbatch):
+            tick0 = time.time()   
+
+            qmodule = {k: qmodule_all[k] for k in list(qmodule_all.keys())[qmi: qmi + qbatch]}
+            if len(qmodule.keys()) == 0:
+                continue
+            for name in qmodule.keys():
+                split_name = name.split('.')[-1]
+                gptq[name] = GPTQ(qmodule[name])
+                gptq[name].quantizer = Quantizer()
+                gptq[name].quantizer.configure(wbits, perchannel=True, sym=False, mse=False)
+
+            def add_batch(name):
+                def tmp(_, inp, out):
+                    gptq[name].add_batch(inp[0].data, out.data)
+                return tmp
+            handles = []
+            for name in qmodule.keys():
+                handles.append(qmodule[name].register_forward_hook(add_batch(name)))
+            
+            for isample in range(nsample):
+                if split_name in filters:
+                    ffn_sample = hidden_states[isample].unsqueeze(0)
+                    layer.mlp(ffn_sample)
+                else:
+                    assert False, f"Not quantize {name}"
+
+            for handle in handles:
+                handle.remove()
+            for name in qmodule.keys():
+                loss[name] = gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups, update=False)
+                gptq[name].free()
+                del gptq[name]
+            
+            tick1 = time.time()
+            print(f"Similate Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {wbits} time: {tick1 - tick0}")
+
+        del qmodule_all
+    
+    # print(loss)
+    if if_dense:
+        up_proj_loss = torch.sum(loss['mlp.up_proj'], dim=1)
+        gate_proj_loss = torch.sum(loss['mlp.gate_proj'], dim=1)
+        down_proj_loss = torch.sum(loss['mlp.down_proj'], dim=1)
+        print(up_proj_loss.shape, gate_proj_loss.shape, down_proj_loss.shape)
+        rates = up_proj_loss + gate_proj_loss
+        # rates = up_proj_loss / up_proj_loss.mean() + gate_proj_loss / gate_proj_loss.mean()
+        print(f"Layer {layer_idx}, neural loss rates: ", rates)
+    else:
+        assert False, "Not support quantize moe layer"
+
+    if save_path:
+        plt.figure(figsize=(10, 10))
+        
+        for i, pp in enumerate([rates, up_proj_loss, gate_proj_loss]):
+            plt.subplot(3, 1, i + 1)
+            pps = pp.detach().cpu().to(dtype=torch.float32).numpy()
+            # pps = sorted(pps, reverse=True)
+
+            neuron_indices = np.arange(pp.shape[0])
+            plt.plot(neuron_indices, pps, 'b-', alpha=0.6)
+            plt.title('Distribution of Neuron Loss Rates')
+            plt.xlabel('Neuron Index')
+            plt.ylabel('Loss')
+            plt.grid(True, alpha=0.3)
+            
+            mean_rate = rates.mean()
+            std_rate = rates.std()
+            stats_text = (f'Mean rate: {mean_rate:.3f}\n'
+                        f'Std rate: {std_rate:.3f}\n'
+                        f'Max rate: {rates.max():.3f}\n'
+                        f'Min rate: {rates.min():.3f}')
+            
+            plt.text(0.95, 0.95, stats_text,
+                    transform=plt.gca().transAxes,
+                    verticalalignment='top',
+                    horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        plt.tight_layout()
+        
+        plt.savefig(save_path)
+        plt.close()
+    
+    return rates
+
 def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num, 
                 attn_hidden_states, ffn_hidden_states, attention_mask, position_ids, position_embeddings, 
                 args):
@@ -611,6 +717,8 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
         except:
             print(f"Quant scheme {qscheme_str} is not valid.")
     
+    loss = {}
+
     for ff in filters:
         qmodule_all = find_layers(layer, filters=[ff])
         qbatch = 64
@@ -672,12 +780,12 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
             for handle in handles:
                 handle.remove()
             for name in qmodule.keys():
-                gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups)
+                loss[name] = gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups)
                 gptq[name].free()
                 del gptq[name]
             
             tick1 = time.time()
-            print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0}")
+            print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0} loss: {loss[name].sum()}")
 
         del qmodule_all
 
@@ -729,7 +837,6 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
 
     # print(hidden_states.shape)
     
-    if_sorted_by_activation = True
     if moe_model_flag:
         if hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts'):        
             moe = reconstruct_moe_from_existing(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)

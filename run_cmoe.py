@@ -98,6 +98,7 @@ if __name__ == '__main__':
     
     print("-" * 50)
     print("Loading model: ", args.model)
+    print("quant-scheme/ppl: ", args.quant_scheme)
     model, tokenizer = load_model(args.model)
 
     dataloader, testloader = get_loaders(

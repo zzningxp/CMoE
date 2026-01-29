@@ -7,9 +7,10 @@ attn_sizes = {"llama7b": 4096 * 4096 * 4,
                               2048 * 2048,  ### MLA,
               "llama3-8b": 4096 * 4096 * 2 + 4096 * 1024 * 2, # GQA
               "qwen3-8b": 4096 * 4096 * 2 + 4096 * 1024 * 2, # GQA
+              "llama2-13b": 5120 * 5120 * 4, # MHA
               } 
 # print(attn_sizes)
-shared_sizes = {"llama7b": 0, "llama3-8b": 0, "qwen3-8b": 0,
+shared_sizes = {"llama7b": 0, "llama3-8b": 0, "qwen3-8b": 0, "llama2-13b": 0,
                 "dpsk-moe-16b": 10944 * 2048 * 3, 
                 "dpsk-v2-lite": 10944 * 2048 * 3, 
                 }
@@ -18,24 +19,28 @@ ffn_sizes = {"llama7b": 4096 * 11008 * 3,
              "dpsk-v2-lite": 2048 * 1408 * 3 * 64,
              "llama3-8b": 4096 * 14336 * 3,
              "qwen3-8b": 4096 * 12288 * 3,
+             "llama2-13b": 5120 * 13824 * 3,
              }
 layer_nums = {"llama7b": 32, 
               "dpsk-moe-16b": 26,
               "dpsk-v2-lite": 26,
               "llama3-8b": 32,
               "qwen3-8b": 36,
+              "llama2-13b": 40,
               }
 vol_sizes = {"llama7b": 32000 * 4096, 
              "dpsk-moe-16b": 102400 * 2048,
              "dpsk-v2-lite": 102400 * 2048,
              "llama3-8b": 128256 * 4096,
              "qwen3-8b": 151936 * 4096,
+             "llama2-13b": 32000 * 5120,
              }
 
 
 modeltype = "llama7b"
 modeltype = "llama3-8b"
 modeltype = "qwen3-8b"
+modeltype = "llama2-13b"
 qscheme_strs = [
 "a8s0m8",
 "a8s0m4",

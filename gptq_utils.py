@@ -175,7 +175,7 @@ class GPTQ:
         # print(self.layer, inp.shape, self.nsamples, self.H)
 
     def fasterquant(
-        self, name: str, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False
+        self, name: str, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, update=True
     ):
         # [N, K]
         W = self.layer.weight.data.clone()
@@ -270,17 +270,18 @@ class GPTQ:
 
         torch.cuda.synchronize()
         # print(f"Time {time.time() - tick:.2f}; Name: {name}; maxq: {self.quantizer.maxq}; Error: {torch.sum(Losses).item()}")
-        # row_sum = torch.sum(Losses, dim=1)
-        # print(row_sum.shape, row_sum)
 
         if actorder:
             Q = Q[:, invperm]
 
-        self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
+        if update:
+            self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
         # print(self.layer.weight.data.dtype)
         if DEBUG:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
-            
+        
+        return Losses
+
     def free(self):
         if DEBUG:
             del self.inp1
