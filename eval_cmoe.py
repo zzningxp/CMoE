@@ -146,9 +146,8 @@ def get_deepseek_v2_lite(model_path):
     return model, tokenizer
 
 def get_qwen3(model_path):
-    from transformers import Qwen3ForCausalLM
 
-    model = Qwen3ForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True,

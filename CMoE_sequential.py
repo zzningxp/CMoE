@@ -70,7 +70,7 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
     # MoE Carving
     moe_model_flag = False
     for layer in layers:
-        moe_model_flag = moe_model_flag or hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts') or hasattr(layer.mlp, 'gate_proj')
+        moe_model_flag = moe_model_flag or hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts')
     if moe_model_flag:
         if hasattr(model.config, 'num_experts'):         ## olmoe，
             slice_expert_num = args.nexperts // model.config.num_experts
