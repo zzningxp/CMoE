@@ -87,6 +87,10 @@ if __name__ == '__main__':
     parser.add_argument(        '--quant-scheme', type=str, default=None,
         help='Quantization scheme like a8s4m3221.'
     )
+    parser.add_argument(        '--rank_mode', 
+        type=str, default="quant_outlier",
+        help='Rank mode for MoE reconstruction. activation|quant_outlier|random|neuron_index'
+    )
     parser.add_argument(        '--reconstruct_start_layer', type=int, default=0,
         help='Start layer for reconstruction.'
     )
@@ -98,7 +102,7 @@ if __name__ == '__main__':
     
     print("-" * 50)
     print("Loading model: ", args.model)
-    print("quant-scheme/ppl: ", args.quant_scheme)
+    print("quant-scheme/rank_mode: (ppl)", args.quant_scheme, args.rank_mode)
     model, tokenizer = load_model(args.model)
 
     dataloader, testloader = get_loaders(

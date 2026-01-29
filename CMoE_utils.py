@@ -20,7 +20,10 @@ from gptq_utils import GPTQ, Quantizer, find_layers
 DEV = torch.device('cuda:0')
 
 @torch.no_grad()
-def analyze_neuron_activations(scores: torch.Tensor, save_path: Optional[str] = None, sparsity = 0.1) -> Tuple[torch.Tensor, torch.Tensor]:
+def analyze_neuron_activations(act_fn, inps, gate_proj_weights, up_proj_weights, save_path: Optional[str] = None, sparsity = 0.1) -> Tuple[torch.Tensor, torch.Tensor]:
+    h = act_fn(F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(gate_proj_weights, p=2, dim=1)))
+    scores = h * F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(up_proj_weights, p=2, dim=1))
+
     K = max(1, math.ceil(scores.shape[-1] * sparsity))  # Top 10% neurons 
     # print("K (top neurons per sample):", scores.shape, K)
 
@@ -291,7 +294,7 @@ def construct_experts_by_rates(
     num_experts,
     num_shared_experts):
 
-    print("origin_rates:", origin_rates.shape)
+    # print("origin_rates:", origin_rates.shape)
     hidden_size = origin_rates.shape[0]
     neurons_per_expert = hidden_size // num_experts
 
@@ -342,15 +345,9 @@ def reconstruct_moe_harddrop(model, layer, hidden_states, n_experts, n_activated
             ori_down_proj_weights = expert.down_proj.weight
 
         # print(f"\nProcessing original expert {expert_idx} / {ori_expert_num}")
-        # Get scores for this specific expert
-        h = expert.act_fn(F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(ori_gate_proj_weights, p=2, dim=1)))
-        h = h * F.linear(F.normalize(hidden_states, p=2, dim=-1), F.normalize(ori_up_proj_weights, p=2, dim=1))
-        expert_scores = h.to('cpu')
-        
+
         # print(f"Expert {expert_idx} scores shape: {expert_scores.shape}")
-        # Calculate activation markers and rates for this expert's neurons
-        rates = analyze_neuron_activations(expert_scores, sparsity=sparsity)
-        # counts, rates, markers = analyze_neuron_activations(expert_scores, save_path=f'./plot/scores_analysis_{layer.self_attn.layer_idx}_{expert_idx}.png', sparsity=sparsity)
+        rates = analyze_neuron_activations(expert.act_fn, hidden_states, ori_gate_proj_weights, ori_up_proj_weights, sparsity=sparsity)
 
         expert_groups, representative_indices = construct_experts_by_rates(
             rates,
@@ -391,7 +388,7 @@ def reconstruct_moe_harddrop(model, layer, hidden_states, n_experts, n_activated
     model.config.intermediate_size = all_new_experts[0].up_proj.weight.shape[0]
     model.config.num_experts = new_expert_num
     model.config.num_experts_per_tok = n_activated
-    print(model.config.intermediate_size, model.config.num_experts, model.config.num_experts_per_tok)
+    # print(model.config.intermediate_size, model.config.num_experts, model.config.num_experts_per_tok)
 
     moe = layer.mlp
     moe.num_experts = len(all_new_experts)
@@ -450,15 +447,18 @@ def lowrank_compress_svd(weight_matrix, lowrank_sparsity, save_path=None):
 @torch.no_grad()
 def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activated, slice_expert_num, device, args):
 
-    # h = layer.mlp.act_fn(F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(layer.mlp.gate_proj.weight, p=2, dim=1)))
-    # h = h * F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(layer.mlp.up_proj.weight, p=2, dim=1))
-
-    # analyze_sparsity = 0.1
-    # rates = analyze_neuron_activations(h, sparsity=analyze_sparsity)
-    
-    rates = analyze_quant_outlier(layer, layer_idx, inps, n_experts, True, f"plot/_quant_outlier_{layer_idx}.png")
-    # rates = torch.randn(layer.mlp.intermediate_size, device=device)
-    # rates = torch.arange(layer.mlp.intermediate_size, device=device)
+    if args.rank_mode == "activation":
+        analyze_sparsity = 0.1
+        rates = analyze_neuron_activations(layer.mlp.act_fn, inps, layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight, sparsity=analyze_sparsity)
+    elif args.rank_mode == "quant_outlier":
+        rates = analyze_quant_outlier(layer, layer_idx, inps, n_experts // slice_expert_num, if_dense=True, save_path=f"plot/_quant_outlier_{layer_idx}.png")
+        rates = rates[0]
+    elif args.rank_mode == "random":
+        rates = torch.randn(layer.mlp.intermediate_size, device=device)
+    elif args.rank_mode == "neuron_index":
+        rates = torch.arange(layer.mlp.intermediate_size, device=device)
+    else:
+        assert False, f"Unknown rank mode: {args.rank_mode}"
 
     expert_groups, representative_indices = construct_experts_by_rates(
         rates,
@@ -507,9 +507,6 @@ def reconstruct_moe_from_existing(model, layer, layer_idx, inps, n_experts, n_ac
     new_expert_num = ori_expert_num * slice_expert_num 
     scaling_factor = slice_expert_num
 
-    # print(ori_expert_num, new_expert_num, scaling_factor)
-    # print(model.config)
-
     ori_router_gate = layer.mlp.gate.weight
     if type(layer.mlp.gate) == nn.Linear:
         new_router = nn.Linear(model.config.hidden_size, new_expert_num, dtype=ori_router_gate.dtype, bias=False).to(device)
@@ -522,18 +519,28 @@ def reconstruct_moe_from_existing(model, layer, layer_idx, inps, n_experts, n_ac
     gate_start_idx = 0
 
     tick0 = time.time()
+
+    if args.rank_mode == "quant_outlier":
+        all_rates = analyze_quant_outlier(layer, layer_idx, inps, n_experts // slice_expert_num, if_dense=False, save_path=None)
+
     for expert_idx, expert in enumerate(layer.mlp.experts):
         ori_gate_proj_weights = expert.gate_proj.weight
         ori_up_proj_weights = expert.up_proj.weight
         ori_down_proj_weights = expert.down_proj.weight
 
         # print(f"\nProcessing original expert {expert_idx} / {ori_expert_num}")
-        h = expert.act_fn(F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(ori_gate_proj_weights, p=2, dim=1)))
-        h = h * F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(ori_up_proj_weights, p=2, dim=1))
-        expert_scores = h.to('cpu')
-
-        analyze_sparsity = 0.1
-        rates = analyze_neuron_activations(expert_scores, sparsity=analyze_sparsity)
+        if args.rank_mode == "activation":
+            analyze_sparsity = 0.1
+            rates = analyze_neuron_activations(expert.act_fn, inps, ori_gate_proj_weights, ori_up_proj_weights, sparsity=analyze_sparsity)
+        elif args.rank_mode == "quant_outlier":
+            rates = all_rates[expert_idx]
+        elif args.rank_mode == "random":
+            rates = torch.randn(layer.mlp.intermediate_size, device=device)
+        elif args.rank_mode == "neuron_index":
+            rates = torch.arange(layer.mlp.intermediate_size, device=device)
+        else:
+            assert False, f"Unknown rank mode: {args.rank_mode}"
+        
         expert_groups, representative_indices = construct_experts_by_rates(
             rates,
             num_experts = slice_expert_num,
@@ -566,7 +573,7 @@ def reconstruct_moe_from_existing(model, layer, layer_idx, inps, n_experts, n_ac
         gate_start_idx += slice_expert_num
 
     tick1 = time.time()
-    print(f"Layer {layer_idx}, Expert re- sort time: {tick1 - tick0}")
+    print(f"Layer {layer_idx}, {args.rank_mode} expert re- sort time: {tick1 - tick0}")
 
     moe = layer.mlp.__class__(model.config).to(device)
     moe.num_experts = len(all_new_experts)
@@ -578,7 +585,7 @@ def reconstruct_moe_from_existing(model, layer, layer_idx, inps, n_experts, n_ac
 
     return moe
 
-def analyze_quant_outlier(layer, layer_idx, hidden_states, n_experts, if_dense=True, save_path=None):
+def analyze_quant_outlier(layer, layer_idx, hidden_states, n, if_dense=True, save_path=None):
     print(f"reconstruct moe from dense layer {layer_idx}")
     nsample = hidden_states.shape[0]
 
@@ -629,23 +636,34 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, n_experts, if_dense=T
                 del gptq[name]
             
             tick1 = time.time()
-            print(f"Similate Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {wbits} time: {tick1 - tick0}")
+            print(f"Simulate quant for outliers, layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {wbits} time: {tick1 - tick0}")
 
         del qmodule_all
     
     # print(loss)
+    all_rates = []
     if if_dense:
-        up_proj_loss = torch.sum(loss['mlp.up_proj'], dim=1)
-        gate_proj_loss = torch.sum(loss['mlp.gate_proj'], dim=1)
-        down_proj_loss = torch.sum(loss['mlp.down_proj'], dim=1)
-        print(up_proj_loss.shape, gate_proj_loss.shape, down_proj_loss.shape)
-        rates = up_proj_loss + gate_proj_loss
+        assert n == 1, "dense model n == 1"
+    for expert_idx in range(n):
+        if n == 1:
+            u = f'mlp.up_proj'
+            g = f'mlp.gate_proj'
+            d = f'mlp.down_proj'
+        else:
+            u = f'mlp.experts.{expert_idx}.up_proj'
+            g = f'mlp.experts.{expert_idx}.gate_proj'
+            d = f'mlp.experts.{expert_idx}.down_proj'
+        
+        up_proj_loss = torch.sum(loss[u], dim=1)
+        gate_proj_loss = torch.sum(loss[g], dim=1)
+        down_proj_loss = torch.sum(loss[d], dim=1)
+        # print(up_proj_loss.shape, gate_proj_loss.shape, down_proj_loss.shape)
+        all_rates.append(up_proj_loss + gate_proj_loss)
         # rates = up_proj_loss / up_proj_loss.mean() + gate_proj_loss / gate_proj_loss.mean()
-        print(f"Layer {layer_idx}, neural loss rates: ", rates)
-    else:
-        assert False, "Not support quantize moe layer"
+    # print(f"Layer {layer_idx}, neural loss rates: ", all_rates)
 
     if save_path:
+        rates = all_rates[0]
         plt.figure(figsize=(10, 10))
         
         for i, pp in enumerate([rates, up_proj_loss, gate_proj_loss]):
@@ -678,7 +696,7 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, n_experts, if_dense=T
         plt.savefig(save_path)
         plt.close()
     
-    return rates
+    return all_rates
 
 def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num, 
                 attn_hidden_states, ffn_hidden_states, attention_mask, position_ids, position_embeddings, 
@@ -796,6 +814,7 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     olmoe_model = 'olmoe' in args.model.lower()
     llama_model = 'llama' in args.model.lower()
     qwen3_model = 'qwen3' in args.model.lower()
+    qwen3_moe_model = 'qwen3-30b-a3b' in args.model.lower()
 
     batchsize = inp.shape[0]
 
@@ -863,7 +882,7 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     tick0 = time.time()
     moe_out = torch.zeros_like(hidden_states)
     for b_i in range(0, batchsize):
-        if olmoe_model:
+        if olmoe_model or qwen3_moe_model:
             moe_out[b_i:b_i+1], _ = layer.mlp(hidden_states[b_i:b_i+1])
         else:
             moe_out[b_i:b_i+1] = layer.mlp(hidden_states[b_i:b_i+1])

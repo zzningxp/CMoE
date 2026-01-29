@@ -145,6 +145,48 @@ def get_deepseek_v2_lite(model_path):
 
     return model, tokenizer
 
+def get_qwen3_30b_a3b(model_path):
+    from transformers import Qwen3MoeForCausalLM
+
+    model = Qwen3MoeForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        device_map = {
+                "model.embed_tokens": "cuda:0",
+                "model.rotary_emb": "cuda:0",
+                **{
+                    f"model.layers.{k}": 0 for k in range(0, 16)
+                },
+                **{
+                    f"model.layers.{k}": 1 for k in range(16, 32)
+                },
+                **{
+                    f"model.layers.{k}": "cpu" for k in range(32, 48)
+                },
+                "model.norm": "cpu",
+                "lm_head": "cpu",
+            },
+        trust_remote_code=True
+    )
+
+    # "model.layers.47.self_attn.q_proj.weight, "
+    # "model.layers.47.self_attn.k_proj.weight, "
+    # "model.layers.47.self_attn.v_proj.weight, "
+    # "model.layers.47.self_attn.o_proj.weight, "
+    # "model.layers.47.self_attn.q_norm.weight, "
+    # "model.layers.47.self_attn.k_norm.weight, "
+    # "model.layers.47.mlp.gate.weight, "
+    # "model.layers.47.mlp.experts.0.gate_proj.weight,"
+    # "model.layers.47.mlp.experts.0.up_proj.weight,"
+    # "model.layers.47.mlp.experts.0.down_proj.weight,"
+    # 128 experts active 8, NO shared experts
+
+    model.seqlen = 2048
+    # model.seqlen = 4096
+
+    return model
+
 def get_qwen3(model_path):
     from transformers import Qwen3ForCausalLM
 
@@ -193,6 +235,9 @@ def load_model(model_path):
         model, tokenizer = get_deepseek_v2_lite(model_path)
     elif 'llama' in model_path.lower():
         model = get_llama(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+    elif 'qwen3-30b-a3b' in model_path.lower():
+        model = get_qwen3_30b_a3b(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
     elif 'qwen3' in model_path.lower():
         model = get_qwen3(model_path)
