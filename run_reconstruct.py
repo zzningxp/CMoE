@@ -9,12 +9,12 @@ import os
 
 import copy
 
-from CMoE_utils import *
-from CMoE_model import *
-from CMoE_sequential import *
+from reconstruct_utils import *
+from reconstruct_modeling import *
+from reconstruct_sequential import *
 from sft_utils import simple_sft
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from eval_cmoe import cmoe_ppl_eval, load_model
+from eval_reconstruct import cmoe_ppl_eval, load_model
 
 def save_results(file_name, results):
     if results is not str:
@@ -81,6 +81,9 @@ if __name__ == '__main__':
     parser.add_argument(        '--eval-zero', action='store_true',
         help='Whether to run downstream tasks evaluation.'
     )
+    parser.add_argument(        '--mixqdense', action='store_true',
+        help='Whether to run mixed quantized dense model.'
+    )
     parser.add_argument(        '--prefix', type=str, default=None,
         help='Prefix the results folder if needed.'
     )
@@ -122,14 +125,14 @@ if __name__ == '__main__':
     # ori_ppl = cmoe_ppl_eval(model, testloader, args.dataset, args)
     # print(f"Original model ppl on {args.dataset}: {ori_ppl}")
 
-    carved_model = cmoe_sequential(model, tokenizer, dataloader, args)
-    save_carved_model = False
-    if save_carved_model:
+    model = sequential(model, tokenizer, dataloader, args)
+    save_model = False
+    if save_model:
         carved_save_dir = f"model/carved_{model.config.model_type}_e{args.nexperts}a{args.nactivated}_{args.quant_scheme}"
-        print(carved_model)
-        carved_model.save_pretrained(carved_save_dir)
+        print(model)
+        model.save_pretrained(carved_save_dir)
         tokenizer.save_pretrained(carved_save_dir)
-        if carved_model.config.model_type == 'qwen3':
+        if model.config.model_type == 'qwen3':
             import json
             with open(os.path.join(carved_save_dir, 'config.json'), 'r') as f:
                 config = json.load(f)
@@ -138,7 +141,7 @@ if __name__ == '__main__':
             with open(os.path.join(carved_save_dir, 'config.json'), 'w') as f:
                 json.dump(config, f, indent=4)
     
-    # print(carved_model)
+    # print(model)
 
     tick1 = time.time()
 
@@ -146,21 +149,21 @@ if __name__ == '__main__':
     if sft_flag:
         print('Starting SFT...')    
 
-        carved_model.cuda()
-        carved_model = simple_sft(carved_model, tokenizer, args, epoch = args.epoch)
+        model.cuda()
+        model = simple_sft(model, tokenizer, args, epoch = args.epoch)
 
-        carved_model.eval()
+        model.eval()
 
         print('SFT_ppl:')
         ppl = []
         datasets = ['wikitext2', 'c4-new']
         for dataset in datasets:
             dataloader, testloader = get_loaders(
-                dataset, seed=args.seed, tokenizer=tokenizer, seqlen=carved_model.seqlen, bsz = args.carve_bsz
+                dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen, bsz = args.carve_bsz
             )
             print(dataset)
             eval_set = dataset
-            ppl_i = cmoe_ppl_eval(carved_model, testloader, eval_set, args)
+            ppl_i = cmoe_ppl_eval(model, testloader, eval_set, args)
             ppl.append(f"{dataset}: {ppl_i}")
         
         print("SFT_ppl: ", ppl)

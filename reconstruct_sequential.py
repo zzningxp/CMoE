@@ -3,10 +3,10 @@ import torch.nn as nn
 import copy
 import time
 from tqdm import tqdm
-from CMoE_utils import *
+from reconstruct_utils import *
 from datautils import *
 from sft_utils import simple_sft
-from eval_cmoe import cmoe_ppl_eval
+from eval_reconstruct import ppl_eval
 
 try:
     from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP, Qwen3MoeSparseMoeBlock
@@ -303,10 +303,10 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     if moe_model_flag:
         if hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts'):        
             moe = reconstruct_moe_from_existing(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
-            layer.mlp = moe
     else:
         moe = reconstruct_moe_from_dense(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
-        layer.mlp = moe
+    
+    layer.mlp = moe
     
     gc.collect()
     torch.cuda.empty_cache()
@@ -337,7 +337,7 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     # print("moe_out")
     return moe_out
 
-def cmoe_sequential(model, tokenizer, dataloader, args):
+def sequential(model, tokenizer, dataloader, args):
     print('Starting ...')
 
     use_cache = model.config.use_cache
@@ -457,7 +457,7 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
         )
         print(dataset)
         eval_set = dataset
-        ppl_i = cmoe_ppl_eval(model, testloader, eval_set, args)
+        ppl_i = ppl_eval(model, testloader, eval_set, args)
         pre_ppl.append(f"{dataset}: {ppl_i}")
     
     return model

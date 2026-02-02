@@ -11,12 +11,12 @@ import os
 
 import copy
 
-from CMoE_utils import *
-from CMoE_model import *
+from reconstruct_utils import *
+from reconstruct_modeling import *
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 @torch.no_grad()
-def cmoe_ppl_eval(model, testloader, eval_set, args):
+def ppl_eval(model, testloader, eval_set, args):
     use_cache = model.config.use_cache
     model.config.use_cache = False
     
