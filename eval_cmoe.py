@@ -126,6 +126,24 @@ def get_olmoe(model_path):
     # model.seqlen = 4096
     return model
 
+def get_deepseek_moe_16b(model_path):
+    from transformers import DeepseekForCausalLM
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    device_map = "auto"
+    model = DeepseekForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        device_map=device_map,
+        trust_remote_code=True
+    )
+
+    model.seqlen = 2048
+    # model.seqlen = 4096
+
+    return model, tokenizer
 def get_deepseek_v2_lite(model_path):
 
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
@@ -144,6 +162,21 @@ def get_deepseek_v2_lite(model_path):
     # model.seqlen = 4096
 
     return model, tokenizer
+def get_qwen3_moe(model_path):
+    from transformers import Qwen3MoeForCausalLM
+
+    model = Qwen3MoeForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        device_map = "auto",
+        trust_remote_code=True
+    )
+
+    model.seqlen = 2048
+    # model.seqlen = 4096
+
+    return model
 
 def get_qwen3_30b_a3b(model_path):
     from transformers import Qwen3MoeForCausalLM
@@ -247,6 +280,9 @@ def load_model(model_path):
     elif 'olmoe' in model_path.lower():
         model = get_olmoe(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+    elif "deepseek-moe-16b" in model_path.lower():
+        model = get_deepseek_moe_16b(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
     elif 'deepseek-v2-lite' in model_path.lower():
         model, tokenizer = get_deepseek_v2_lite(model_path)
     elif 'llama' in model_path.lower():
@@ -255,6 +291,9 @@ def load_model(model_path):
     elif 'qwen3-30b-a3b' in model_path.lower():
         model = get_qwen3_30b_a3b(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+    elif 'qwen3_moe' in model_path.lower():
+        model = get_qwen3_moe(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
     elif 'qwen3' in model_path.lower():
         model = get_qwen3(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -262,7 +301,7 @@ def load_model(model_path):
         model = get_moonlight(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     else:
-        model, tokenizer = get_auto(model_path)
+        assert False, "Model type not supported."
     model.eval()
     return model, tokenizer
 
@@ -287,6 +326,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     
+    print("", args.model)
 
     if not args.eval_zero:
         print("Loading model: ", args.model.lower())
@@ -309,6 +349,7 @@ if __name__ == '__main__':
             print("PPL on {}: {:.4f}".format(dataset, ppl_i))
 
     if args.eval_zero:
+        tick0 = time.time()
         from lm_eval import tasks, evaluator, utils
         from lm_eval.models.huggingface import HFLM
 
@@ -327,14 +368,17 @@ if __name__ == '__main__':
             device="cuda",
         )
 
-        task_list = ["arc_challenge", "arc_easy", "piqa", "boolq",]
-        # task_list = ["winogrande","hellaswag"]
+        task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande"] #, "hellaswag"]
         for task in task_list:
             results = evaluator.simple_evaluate(
                 model=model,
                 tasks=[task],
                 num_fewshot=5,
-                batch_size="auto",
+                batch_size=16,
+                # batch_size="auto",
                 device="cuda"
             )
             print(task, results["results"][task]) 
+        
+        tick1 = time.time()
+        print(f"Zero-shot evaluation time: {tick1 - tick0}")

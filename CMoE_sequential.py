@@ -8,6 +8,11 @@ from datautils import *
 from sft_utils import simple_sft
 from eval_cmoe import cmoe_ppl_eval
 
+try:
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP, Qwen3MoeSparseMoeBlock
+except:
+    pass
+
 DEV = torch.device('cuda:0')
 
 @torch.no_grad()
@@ -39,7 +44,10 @@ def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activ
     new_intermediate_size = layer.mlp.intermediate_size // slice_expert_num
     expert_groups = expert_groups[1:]
     for ii, group_indices in enumerate(expert_groups):
-        expert_mlp = LlamaMLP(layer.mlp.hidden_size, new_intermediate_size)
+        if model.config.model_type == 'qwen3':
+            expert_mlp = Qwen3MoeMLP(model.config)
+        else:
+            expert_mlp = LlamaMLP(layer.mlp.hidden_size, new_intermediate_size)
 
         with torch.no_grad():
             group_indices_tensor = torch.tensor(group_indices, dtype=torch.long, device=device)
@@ -53,16 +61,21 @@ def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activ
         total_neurons_processed += new_expert_intermediate_size
         # print(ii, scaling_factor, new_expert_intermediate_size, expert_mlp.gate_proj.weight.shape, expert_mlp.up_proj.weight.shape, expert_mlp.down_proj.weight.shape)
     
-    router = Router(layer.mlp.hidden_size, slice_expert_num, n_activated).to(device)
-    router.gate.weight.data = torch.ones(slice_expert_num, layer.mlp.hidden_size).to(torch.bfloat16).to(device)
-    router.classifier = None
-    # init router gate to 1，and make all experts are activated
+    if model.config.model_type == 'qwen3':
+        moe = Qwen3MoeSparseMoeBlock(model.config)
+        moe.gate.weight.data = torch.ones(slice_expert_num, layer.mlp.hidden_size).to(torch.bfloat16).to(device)
+        moe.experts = experts
+    else:
+        router = Router(layer.mlp.hidden_size, slice_expert_num, n_activated).to(device)
+        router.gate.weight.data = torch.ones(slice_expert_num, layer.mlp.hidden_size).to(torch.bfloat16).to(device)
+        router.classifier = None
+        # init router gate to 1，and make all experts are activated
 
-    # MoE
-    moe = MoE(layer.mlp.hidden_size, new_intermediate_size, slice_expert_num, 0, n_activated).to(device)
-    moe.gate = router
-    moe.experts = experts
-    moe.shared_experts = None
+        # MoE
+        moe = MoE(layer.mlp.hidden_size, new_intermediate_size, slice_expert_num, 0, n_activated).to(device)
+        moe.gate = router
+        moe.experts = experts
+        moe.shared_experts = None
 
     return moe
 
@@ -245,13 +258,8 @@ def reconstruct_moe_harddrop(model, layer, hidden_states, n_experts, n_activated
 @torch.no_grad()
 def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
                                 n_experts, n_activated, slice_expert_num, n_shared, args):
-
-    olmoe_model = 'olmoe' in args.model.lower()
-    llama_model = 'llama' in args.model.lower()
-    qwen3_model = 'qwen3' in args.model.lower()
-    qwen3_moe_model = 'qwen3-30b-a3b' in args.model.lower()
-    dpskv3_model = 'moonlight' in args.model.lower()
-
+    
+    modeltype = model.config.model_type
     batchsize = inp.shape[0]
 
     device = next(layer.parameters()).device
@@ -272,7 +280,7 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     tick0 = time.time()
     attn_out = torch.zeros_like(hidden_states_inorm)
     for b_i in range(0, batchsize):
-        if olmoe_model or llama_model or qwen3_model or dpskv3_model:
+        if modeltype == 'olmoe' or modeltype == 'llama' or modeltype == 'qwen3' or modeltype == 'deepseek_v3':
             attn_out[b_i:b_i+1] = layer.self_attn(
                 hidden_states=hidden_states_inorm[b_i:b_i+1],
                 attention_mask=attention_mask,
@@ -318,7 +326,7 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     tick0 = time.time()
     moe_out = torch.zeros_like(hidden_states)
     for b_i in range(0, batchsize):
-        if olmoe_model or qwen3_moe_model:
+        if modeltype == 'olmoe' or modeltype == 'qwen3_moe' or modeltype == 'qwen3':
             moe_out[b_i:b_i+1], _ = layer.mlp(hidden_states[b_i:b_i+1])
         else:
             moe_out[b_i:b_i+1] = layer.mlp(hidden_states[b_i:b_i+1])
@@ -410,11 +418,18 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
     else:
         print("The model is a dense model. Proceeding to carve MoE layers. ")
         slice_expert_num = args.nexperts
+    
+    if model.config.model_type == 'qwen3':
+        model.config.num_experts_per_tok = args.nactivated
+        model.config.num_experts = slice_expert_num
+        model.config.norm_topk_prob = True
+        model.config.intermediate_size = model.config.intermediate_size // slice_expert_num
+        model.config.moe_intermediate_size = model.config.intermediate_size
 
     inps = inps.squeeze(1)
 
     for layer_idx, layer in tqdm(enumerate(layers), desc = 'Carving MoE layers...'):
-        moe_out = construct_moe(model, 
+        moe_out = construct_moe(model,
             moe_model_flag,
             layer, 
             layer_idx,
@@ -432,7 +447,7 @@ def cmoe_sequential(model, tokenizer, dataloader, args):
         inps = moe_out
         gc.collect()
         torch.cuda.empty_cache()
-    
+        
     # print('Training_free_ppl:')
     pre_ppl = []
     datasets = ['wikitext2', 'c4-new']

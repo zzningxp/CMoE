@@ -125,10 +125,18 @@ if __name__ == '__main__':
     carved_model = cmoe_sequential(model, tokenizer, dataloader, args)
     save_carved_model = False
     if save_carved_model:
-        carved_save_dir = "model/carved_cmoe_e" + str(args.nexperts) + "_a" + str(args.nactivated)
+        carved_save_dir = f"model/carved_{model.config.model_type}_e{args.nexperts}a{args.nactivated}_{args.quant_scheme}"
         print(carved_model)
         carved_model.save_pretrained(carved_save_dir)
         tokenizer.save_pretrained(carved_save_dir)
+        if carved_model.config.model_type == 'qwen3':
+            import json
+            with open(os.path.join(carved_save_dir, 'config.json'), 'r') as f:
+                config = json.load(f)
+                config['model_type'] = 'qwen3_moe'
+                config['architectures'][0] = 'Qwen3MoEForCausalLM'
+            with open(os.path.join(carved_save_dir, 'config.json'), 'w') as f:
+                json.dump(config, f, indent=4)
     
     # print(carved_model)
 
