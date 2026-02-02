@@ -10,11 +10,11 @@ import os
 import copy
 
 from reconstruct_utils import *
-from reconstruct_modeling import *
+from reconstruct_moe_modeling import *
 from reconstruct_sequential import *
 from sft_utils import simple_sft
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from eval_reconstruct import cmoe_ppl_eval, load_model
+from eval_reconstruct import ppl_eval, load_model
 
 def save_results(file_name, results):
     if results is not str:
@@ -45,9 +45,6 @@ if __name__ == '__main__':
     )
     parser.add_argument(        '--nsamples', type=int, default=128,
         help='Number of Fine-tuning data for CMoE.'
-    )
-    parser.add_argument(        '--new-eval', action='store_true',
-        help='Whether to use the new PTB and C4 eval.'
     )
     parser.add_argument(        '--extra-lr',
         type=float, default=0.001, 
@@ -168,6 +165,30 @@ if __name__ == '__main__':
         
         print("SFT_ppl: ", ppl)
 
+    if args.eval_zero:
+        tick0 = time.time()
+        from lm_eval import tasks, evaluator, utils
+        from lm_eval.models.huggingface import HFLM
+        model = HFLM(
+            pretrained=model,
+            trust_remote_code=True,
+            device="cuda",
+        )
+
+        task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande"] #, "hellaswag"]
+        for task in task_list:
+            results = evaluator.simple_evaluate(
+                model=model,
+                tasks=[task],
+                num_fewshot=5,
+                batch_size="auto",
+                device="cuda"
+            )
+            print(task, results["results"][task]) 
+        
+        tick1 = time.time()
+        print(f"Zero-shot evaluation time: {tick1 - tick0}")
+    
     rt = time.time() - tick1
     print(f"Runtime of training-free construction (ppl): {tick1 - tick:.2f}")
     print(f"Runtime of fine-tuning construction: {rt:.2f}")

@@ -12,8 +12,9 @@ from typing import Optional, Tuple, List
 import re
 import time
 import gc
+import scipy.stats as stats
 
-from reconstruct_modeling import *
+from reconstruct_moe_modeling import *
 from gptq_utils import GPTQ, Quantizer, find_layers
 
 
@@ -128,6 +129,29 @@ def analyze_neuron_activations(act_fn, inps, gate_proj_weights, up_proj_weights,
     
     return activation_rates
     # return activation_counts, activation_values, activation_markers
+
+@torch.no_grad()
+def construct_unequal_by_rates(
+    origin_rates, num_experts = 3, quantiles = [0, 0.05, 0.95, 1]):
+
+    assert len(quantiles) == num_experts + 1, "Quantiles must have num_experts + 1 elements" 
+    hidden_size = origin_rates.shape[0]
+    neurons_per_expert = [int(p * hidden_size) for p in quantiles]
+
+    # sorted_rates = sorted(origin_rates, reverse=True)
+    # pareto_dist = stats.pareto(b=2)
+    # params = pareto_dist.fit(sorted_rates)
+    # xm_mle, alpha_mle = params
+
+    expert_groups = []
+    rates = origin_rates.float()
+
+    _, top_indices = torch.topk(rates, hidden_size)
+    for i in range(num_experts):
+        expert_indices = top_indices[neurons_per_expert[i]:neurons_per_expert[i+1]].tolist()
+        expert_groups.append(expert_indices)
+    
+    return expert_groups, None
 
 @torch.no_grad()
 def construct_experts_by_rates(
@@ -283,7 +307,7 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, n, if_dense=True, sav
         for i, pp in enumerate([rates, up_proj_loss, gate_proj_loss]):
             plt.subplot(3, 1, i + 1)
             pps = pp.detach().cpu().to(dtype=torch.float32).numpy()
-            # pps = sorted(pps, reverse=True)
+            pps = sorted(pps, reverse=True)
 
             neuron_indices = np.arange(pp.shape[0])
             plt.plot(neuron_indices, pps, 'b-', alpha=0.6)

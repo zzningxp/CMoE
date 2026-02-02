@@ -5,8 +5,8 @@ import time
 from tqdm import tqdm
 from reconstruct_utils import *
 from datautils import *
-from sft_utils import simple_sft
 from eval_reconstruct import ppl_eval
+from mixqdense_modeling import MixQDenseMLP, MixQDenseMoEBlock
 
 try:
     from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeMLP, Qwen3MoeSparseMoeBlock
@@ -14,6 +14,56 @@ except:
     pass
 
 DEV = torch.device('cuda:0')
+
+@torch.no_grad()
+def reconstruct_dense(model, layer, layer_idx, inps, n_experts, n_activated, slice_expert_num, device, args):
+
+    if args.rank_mode == "activation":
+        analyze_sparsity = 0.1
+        rates = analyze_neuron_activations(layer.mlp.act_fn, inps, layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight, sparsity=analyze_sparsity)
+    elif args.rank_mode == "quant_outlier":
+        rates = analyze_quant_outlier(layer, layer_idx, inps, 1, if_dense=True) #, save_path=f"plot/_quant_outlier_{layer_idx}.png")
+        rates = rates[0]
+    elif args.rank_mode == "random":
+        rates = torch.randn(layer.mlp.intermediate_size, device=device)
+    elif args.rank_mode == "neuron_index":
+        rates = torch.arange(layer.mlp.intermediate_size, device=device)
+    else:
+        assert False, f"Unknown rank mode: {args.rank_mode}"
+
+    print(slice_expert_num)
+    expert_num = slice_expert_num
+    quantiles = [0, 0.05, 0.95, 1]
+    quantiles = [0, 0.25, 0.75, 1]
+    expert_groups, _ = construct_unequal_by_rates(
+        rates,
+        num_experts = expert_num,
+        quantiles = quantiles,
+    )
+    
+    experts = nn.ModuleList()
+    total_neurons_processed = 0
+
+    for ii, group_indices in enumerate(expert_groups):
+        new_intermediate_size = len(group_indices)
+        expert_mlp = MixQDenseMLP(layer.mlp.hidden_size, new_intermediate_size)
+
+        with torch.no_grad():
+            group_indices_tensor = torch.tensor(group_indices, dtype=torch.long, device=device)
+            
+            expert_mlp.gate_proj.weight.data = layer.mlp.gate_proj.weight[group_indices_tensor, :]
+            expert_mlp.up_proj.weight.data = layer.mlp.up_proj.weight[group_indices_tensor, :]
+            expert_mlp.down_proj.weight.data = layer.mlp.down_proj.weight[:, group_indices_tensor]
+            
+        experts.append(expert_mlp)
+        total_neurons_processed += new_intermediate_size
+        print(ii, new_intermediate_size, expert_mlp.gate_proj.weight.shape, expert_mlp.up_proj.weight.shape, expert_mlp.down_proj.weight.shape)
+    
+    # MoE
+    moe = MixQDenseMoEBlock(expert_num).to(device)
+    moe.experts = experts
+
+    return moe
 
 @torch.no_grad()
 def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activated, slice_expert_num, device, args):
@@ -303,6 +353,8 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     if moe_model_flag:
         if hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts'):        
             moe = reconstruct_moe_from_existing(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
+    elif args.mixqdense:
+        moe = reconstruct_dense(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
     else:
         moe = reconstruct_moe_from_dense(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
     
@@ -326,10 +378,11 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     tick0 = time.time()
     moe_out = torch.zeros_like(hidden_states)
     for b_i in range(0, batchsize):
-        if modeltype == 'olmoe' or modeltype == 'qwen3_moe' or modeltype == 'qwen3':
-            moe_out[b_i:b_i+1], _ = layer.mlp(hidden_states[b_i:b_i+1])
+        out = layer.mlp(hidden_states[b_i:b_i+1])
+        if isinstance(out, tuple):
+            moe_out[b_i:b_i+1] = out[0]
         else:
-            moe_out[b_i:b_i+1] = layer.mlp(hidden_states[b_i:b_i+1])
+            moe_out[b_i:b_i+1] = out
     tick1 = time.time()
     print(f"Inference in new moe layer {layer_idx} with batch size {batchsize} time: {tick1 - tick0}")
 

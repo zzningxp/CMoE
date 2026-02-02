@@ -12,7 +12,7 @@ import os
 import copy
 
 from reconstruct_utils import *
-from reconstruct_modeling import *
+from reconstruct_moe_modeling import *
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 @torch.no_grad()
@@ -320,7 +320,7 @@ if __name__ == '__main__':
     parser.add_argument(        '--seed',
         type=int, default=0, help='Seed for sampling the calibration data.'
     )
-    parser.add_argument(        '--eval_zero',
+    parser.add_argument(        '--eval-zero',
         action='store_true', help='Evaluate zero-shot performance.'
     )
 
@@ -349,9 +349,6 @@ if __name__ == '__main__':
             print("PPL on {}: {:.4f}".format(dataset, ppl_i))
 
     if args.eval_zero:
-        tick0 = time.time()
-        from lm_eval import tasks, evaluator, utils
-        from lm_eval.models.huggingface import HFLM
 
         tokenizer = AutoTokenizer.from_pretrained(args.model)
         model = AutoModelForCausalLM.from_pretrained(
@@ -362,6 +359,9 @@ if __name__ == '__main__':
             trust_remote_code=True
         )
 
+        tick0 = time.time()
+        from lm_eval import tasks, evaluator, utils
+        from lm_eval.models.huggingface import HFLM
         model = HFLM(
             pretrained=model,
             trust_remote_code=True,
