@@ -83,6 +83,29 @@ def ppl_eval(model, testloader, eval_set, args):
 
     return ppl.item()
 
+def eval_zero_shot(model, task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande"]):
+    tick0 = time.time()
+    from lm_eval import tasks, evaluator, utils
+    from lm_eval.models.huggingface import HFLM
+    model = HFLM(
+        pretrained=model,
+        trust_remote_code=True,
+        device="cuda",
+    )
+
+    for task in task_list:
+        results = evaluator.simple_evaluate(
+            model=model,
+            tasks=[task],
+            num_fewshot=5,
+            batch_size="auto",
+            device="cuda"
+        )
+        print(task, results["results"][task]) 
+    
+    tick1 = time.time()
+    print(f"Zero-shot evaluation time: {tick1 - tick0}")
+
 def get_llama(model):
     def skip(*args, **kwargs):
         pass
@@ -359,26 +382,7 @@ if __name__ == '__main__':
             trust_remote_code=True
         )
 
-        tick0 = time.time()
-        from lm_eval import tasks, evaluator, utils
-        from lm_eval.models.huggingface import HFLM
-        model = HFLM(
-            pretrained=model,
-            trust_remote_code=True,
-            device="cuda",
-        )
+        task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande"]
+        #, "hellaswag"]
 
-        task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande"] #, "hellaswag"]
-        for task in task_list:
-            results = evaluator.simple_evaluate(
-                model=model,
-                tasks=[task],
-                num_fewshot=5,
-                batch_size=16,
-                # batch_size="auto",
-                device="cuda"
-            )
-            print(task, results["results"][task]) 
-        
-        tick1 = time.time()
-        print(f"Zero-shot evaluation time: {tick1 - tick0}")
+        eval_zero_shot(model, task_list)

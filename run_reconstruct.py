@@ -1,3 +1,4 @@
+from eval_reconstruct import eval_zero_shot
 import time
 
 import torch
@@ -166,28 +167,8 @@ if __name__ == '__main__':
         print("SFT_ppl: ", ppl)
 
     if args.eval_zero:
-        tick0 = time.time()
-        from lm_eval import tasks, evaluator, utils
-        from lm_eval.models.huggingface import HFLM
-        model = HFLM(
-            pretrained=model,
-            trust_remote_code=True,
-            device="cuda",
-        )
-
-        task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande"] #, "hellaswag"]
-        for task in task_list:
-            results = evaluator.simple_evaluate(
-                model=model,
-                tasks=[task],
-                num_fewshot=5,
-                batch_size="auto",
-                device="cuda"
-            )
-            print(task, results["results"][task]) 
-        
-        tick1 = time.time()
-        print(f"Zero-shot evaluation time: {tick1 - tick0}")
+        task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande"]
+        eval_zero_shot(model, task_list)
     
     rt = time.time() - tick1
     print(f"Runtime of training-free construction (ppl): {tick1 - tick:.2f}")

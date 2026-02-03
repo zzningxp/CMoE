@@ -22,7 +22,7 @@ def reconstruct_dense(model, layer, layer_idx, inps, n_experts, n_activated, sli
         analyze_sparsity = 0.1
         rates = analyze_neuron_activations(layer.mlp.act_fn, inps, layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight, sparsity=analyze_sparsity)
     elif args.rank_mode == "quant_outlier":
-        rates = analyze_quant_outlier(layer, layer_idx, inps, 1, if_dense=True) #, save_path=f"plot/_quant_outlier_{layer_idx}.png")
+        rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, 1, if_dense=True, save_path=f"plot/_quant_outlier_{layer_idx}.png")
         rates = rates[0]
     elif args.rank_mode == "random":
         rates = torch.randn(layer.mlp.intermediate_size, device=device)
@@ -31,14 +31,10 @@ def reconstruct_dense(model, layer, layer_idx, inps, n_experts, n_activated, sli
     else:
         assert False, f"Unknown rank mode: {args.rank_mode}"
 
-    print(slice_expert_num)
     expert_num = slice_expert_num
-    quantiles = [0, 0.05, 0.95, 1]
-    quantiles = [0, 0.25, 0.75, 1]
     expert_groups, _ = construct_unequal_by_rates(
         rates,
         num_experts = expert_num,
-        quantiles = quantiles,
     )
     
     experts = nn.ModuleList()
@@ -72,7 +68,7 @@ def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activ
         analyze_sparsity = 0.1
         rates = analyze_neuron_activations(layer.mlp.act_fn, inps, layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight, sparsity=analyze_sparsity)
     elif args.rank_mode == "quant_outlier":
-        rates = analyze_quant_outlier(layer, layer_idx, inps, n_experts // slice_expert_num, if_dense=True, save_path=f"plot/_quant_outlier_{layer_idx}.png")
+        rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, n_experts // slice_expert_num, if_dense=True, save_path=f"plot/_quant_outlier_{layer_idx}.png")
         rates = rates[0]
     elif args.rank_mode == "random":
         rates = torch.randn(layer.mlp.intermediate_size, device=device)
@@ -151,7 +147,7 @@ def reconstruct_moe_from_existing(model, layer, layer_idx, inps, n_experts, n_ac
     tick0 = time.time()
 
     if args.rank_mode == "quant_outlier":
-        all_rates = analyze_quant_outlier(layer, layer_idx, inps, n_experts // slice_expert_num, if_dense=False, save_path=None)
+        all_rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, n_experts // slice_expert_num, if_dense=False, save_path=None)
 
     for expert_idx, expert in enumerate(layer.mlp.experts):
         ori_gate_proj_weights = expert.gate_proj.weight
@@ -368,9 +364,10 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     if_quant_attn = True
 
     if if_quant_layer:
-        quant_layer_mix_precision(layer, layer_idx, if_quant_attn, slice_expert_num, 
+        quanted_size = quant_layer_mix_precision(layer, layer_idx, if_quant_attn, slice_expert_num, 
                     hidden_states_inorm, hidden_states, attention_mask, position_ids, position_embeddings, 
                     args)
+        print(f"Quantized size of layer {layer_idx}: {quanted_size}")
         gc.collect()
         torch.cuda.empty_cache()
     
@@ -388,7 +385,7 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
 
     moe_out = moe_out + residual
     # print("moe_out")
-    return moe_out
+    return moe_out, quanted_size
 
 def sequential(model, tokenizer, dataloader, args):
     print('Starting ...')
@@ -480,9 +477,11 @@ def sequential(model, tokenizer, dataloader, args):
         model.config.moe_intermediate_size = model.config.intermediate_size
 
     inps = inps.squeeze(1)
+    
+    all_quanted_size = 0
 
     for layer_idx, layer in tqdm(enumerate(layers), desc = 'Carving MoE layers...'):
-        moe_out = construct_moe(model,
+        moe_out, quanted_size = construct_moe(model,
             moe_model_flag,
             layer, 
             layer_idx,
@@ -497,10 +496,19 @@ def sequential(model, tokenizer, dataloader, args):
             args = args
         )
 
+        all_quanted_size += quanted_size
         inps = moe_out
         gc.collect()
         torch.cuda.empty_cache()
-        
+    
+    print(f"Total quantized size of all quanted layers: {all_quanted_size} b, in GB: {all_quanted_size / 8 / 1024 / 1024 / 1024:.4f}")
+    # From model.lm_head and vocab_embedding, unquantized with fp16 size, most of models used same weights
+    # if hasattr(model, 'model') and hasattr(model.model, 'embed_tokens'):
+    #     all_quanted_size += model.model.vocab_size * model.config.hidden_size * 16
+    if hasattr(model, 'lm_head') and hasattr(model.lm_head, 'weight'):
+        all_quanted_size += model.lm_head.weight.numel() * 16 
+    print(f"Total quantized size of all layers (+vol emb): {all_quanted_size} b, in GB: {all_quanted_size / 8 / 1024 / 1024 / 1024:.4f}")
+
     # print('Training_free_ppl:')
     pre_ppl = []
     datasets = ['wikitext2', 'c4-new']

@@ -20,6 +20,59 @@ from gptq_utils import GPTQ, Quantizer, find_layers
 
 DEV = torch.device('cuda:0')
 
+def dp_pareto_step_fit(x, n, step_size=32):
+    ori_len = len(x)
+    x = [np.mean(x[i:min(i+step_size, len(x))]) for i in range(0, len(x), step_size)]
+    n_points = len(x)
+    if n_points <= n:
+        return x, [i for i in range(n)], x
+    
+    squared_errors = np.zeros((n_points, n_points))
+    
+    for i in range(n_points):
+        for j in range(i, n_points):
+            segment = x[i:j+1]
+            mean_val = np.mean(segment)
+            squared_errors[i, j] = np.sum((segment - mean_val) ** 2)
+    
+    dp = np.full((n_points + 1, n + 1), float('inf'))
+    split_points = np.full((n_points + 1, n + 1), -1, dtype=int)
+    
+    dp[0][0] = 0
+    
+    for i in range(1, n_points + 1):
+        for k in range(1, min(i, n) + 1):
+            for j in range(k - 1, i):
+                error = dp[j][k-1] + squared_errors[j][i-1]
+                if error < dp[i][k]:
+                    dp[i][k] = error
+                    split_points[i][k] = j
+    
+    splits = []
+    i, k = n_points, n
+    while k > 0:
+        j = split_points[i][k]
+        splits.append(j)
+        i, k = j, k - 1
+    
+    splits.reverse()
+
+    fit_data = []
+    for i in splits:
+        fit_data.append(x[i])
+
+    split_points = [i * step_size for i in splits]
+    # print(splits, split_points)
+
+    split_points.append(n_points * step_size)
+    fit_line = []
+    for i in range(len(fit_data)):
+        for j in range(split_points[i], split_points[i + 1]):
+            fit_line.append(fit_data[i])
+
+    return fit_data, split_points, fit_line[:ori_len]
+
+
 @torch.no_grad()
 def analyze_neuron_activations(act_fn, inps, gate_proj_weights, up_proj_weights, save_path: Optional[str] = None, sparsity = 0.1) -> Tuple[torch.Tensor, torch.Tensor]:
     h = act_fn(F.linear(F.normalize(inps, p=2, dim=-1), F.normalize(gate_proj_weights, p=2, dim=1)))
@@ -131,24 +184,24 @@ def analyze_neuron_activations(act_fn, inps, gate_proj_weights, up_proj_weights,
     # return activation_counts, activation_values, activation_markers
 
 @torch.no_grad()
-def construct_unequal_by_rates(
-    origin_rates, num_experts = 3, quantiles = [0, 0.05, 0.95, 1]):
+def construct_unequal_by_rates(origin_rates, num_experts):
 
-    assert len(quantiles) == num_experts + 1, "Quantiles must have num_experts + 1 elements" 
+    rates = origin_rates.detach().cpu().numpy()
+    rates = sorted(rates, reverse=True)
+    fit_data, quantiles, fit_line = dp_pareto_step_fit(np.log(rates), num_experts * 2)
+    print("quantiles:", quantiles)
+    quantiles = quantiles[:2] + quantiles[-2:]
+    print("quantiles:", quantiles)
+    assert quantiles[0] == 0 and quantiles[-1] == origin_rates.shape[0] and len(quantiles) == num_experts + 1
+
     hidden_size = origin_rates.shape[0]
-    neurons_per_expert = [int(p * hidden_size) for p in quantiles]
-
-    # sorted_rates = sorted(origin_rates, reverse=True)
-    # pareto_dist = stats.pareto(b=2)
-    # params = pareto_dist.fit(sorted_rates)
-    # xm_mle, alpha_mle = params
 
     expert_groups = []
     rates = origin_rates.float()
 
     _, top_indices = torch.topk(rates, hidden_size)
     for i in range(num_experts):
-        expert_indices = top_indices[neurons_per_expert[i]:neurons_per_expert[i+1]].tolist()
+        expert_indices = top_indices[quantiles[i]:quantiles[i+1]].tolist()
         expert_groups.append(expert_indices)
     
     return expert_groups, None
@@ -169,7 +222,7 @@ def construct_experts_by_rates(
 
     expert_groups.append([])
     _, top_indices = torch.topk(rates, hidden_size)
-    for i in range(num_experts):        
+    for i in range(num_experts):
         expert_indices = top_indices[i*neurons_per_expert:(i+1)*neurons_per_expert].tolist()
         expert_groups.append(expert_indices)
     
@@ -223,7 +276,7 @@ def lowrank_compress_svd(weight_matrix, lowrank_sparsity, save_path=None):
     return low_rank_matrix.to(weight_matrix.dtype)
 
 @torch.no_grad()
-def analyze_quant_outlier(layer, layer_idx, hidden_states, n, if_dense=True, save_path=None):
+def analyze_quant_outlier(layer, layer_idx, hidden_states, slice_num, n, if_dense=True, save_path=None):
     print(f"reconstruct moe from dense layer {layer_idx}")
     nsample = hidden_states.shape[0]
 
@@ -303,17 +356,22 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, n, if_dense=True, sav
     if save_path:
         rates = all_rates[0]
         plt.figure(figsize=(10, 10))
-        
-        for i, pp in enumerate([rates, up_proj_loss, gate_proj_loss]):
-            plt.subplot(3, 1, i + 1)
+        # plt_set = [rates, up_proj_loss, gate_proj_loss]
+        plt_set = [rates]
+        for i, pp in enumerate(plt_set):
+            plt.subplot(len(plt_set), 1, i + 1)
             pps = pp.detach().cpu().to(dtype=torch.float32).numpy()
             pps = sorted(pps, reverse=True)
+            fit_data, split_points, fit_line = dp_pareto_step_fit(np.log(pps), slice_num * 2)
+            fit_line = np.exp(fit_line)
 
             neuron_indices = np.arange(pp.shape[0])
+            plt.plot(neuron_indices, fit_line, 'r-', alpha=0.6)
             plt.plot(neuron_indices, pps, 'b-', alpha=0.6)
             plt.title('Distribution of Neuron Loss Rates')
             plt.xlabel('Neuron Index')
             plt.ylabel('Loss')
+            plt.yscale('log')
             plt.grid(True, alpha=0.3)
             
             mean_rate = rates.mean()
@@ -374,6 +432,7 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
             print(f"Quant scheme {qscheme_str} is not valid.")
     
     loss = {}
+    quanted_size = 0
 
     for ff in filters:
         qmodule_all = find_layers(layer, filters=[ff])
@@ -395,15 +454,19 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                 if split_name in attn_filters:
                     bit = qscheme_attn
                     gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
+                    quanted_size += qmodule[name].weight.numel() * (bit[0] + 32 / groupsize) ## sym = False is 32, sym = True has no zero point is 16
                 else:
                     match = re.search(r'mlp\.experts\.(\d+)', name)
                     expert_id = int(match.group(1)) if match else -1  ## shared expert id is -1
                     if expert_id == -1:
                         bit = qscheme_share
                         gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
+                        quanted_size += qmodule[name].weight.numel() * (bit[0] + 32 / groupsize)
                     else:
                         bit = qscheme_expert
-                        gptq[name].quantizer.configure(bit[expert_id % slice_expert_num], perchannel=True, sym=sym, mse=False)
+                        eid = expert_id % slice_expert_num
+                        gptq[name].quantizer.configure(bit[eid], perchannel=True, sym=sym, mse=False)
+                        quanted_size += qmodule[name].weight.numel() * (bit[eid] + 32 / groupsize)
 
             def add_batch(name):
                 def tmp(_, inp, out):
@@ -444,3 +507,5 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
             print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0} loss: {loss[name].sum()}")
 
         del qmodule_all
+
+    return quanted_size
