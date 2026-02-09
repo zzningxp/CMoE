@@ -61,10 +61,10 @@ if __name__ == '__main__':
     parser.add_argument(        '--nexperts', type=int, default=16,
         help='Total number of experts. N in paper.'
     )
-    parser.add_argument(        '--nactivated', type=int, default=2,
+    parser.add_argument(        '--nactivated', type=int, required=True,
         help='Number of activated routed experts.'
     )
-    parser.add_argument(        '--nshared', type=int, default=2,
+    parser.add_argument(        '--nshared', type=int, default=0,
         help='Number of shared experts.'
     )
     parser.add_argument(        '--epoch', type=int, default=0,
@@ -88,6 +88,9 @@ if __name__ == '__main__':
     parser.add_argument(        '--quant-scheme', type=str, default=None,
         help='Quantization scheme like a8s4m3221.'
     )
+    parser.add_argument(        '--dyn-scheme', type=str, default=None,
+        help='Quantization scheme like b3l5h50.'
+    )
     parser.add_argument(        '--rank-mode', 
         type=str, default="quant_outlier",
         help='Rank mode for MoE reconstruction. activation|quant_outlier|random|neuron_index'
@@ -102,8 +105,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     print("-" * 50)
-    print("Loading model: ", args.model)
-    print("quant-scheme/rank-mode: (ppl)", args.quant_scheme, args.rank_mode)
+    print("model/quant-scheme/rank-mode/dyn-scheme: (ppl)", args.model, args.quant_scheme, args.rank_mode, args.dyn_scheme)
     model, tokenizer = load_model(args.model)
 
     dataloader, testloader = get_loaders(
@@ -161,15 +163,15 @@ if __name__ == '__main__':
             )
             print(dataset)
             eval_set = dataset
-            ppl_i = cmoe_ppl_eval(model, testloader, eval_set, args)
+            ppl_i = ppl_eval(model, testloader, eval_set, args)
             ppl.append(f"{dataset}: {ppl_i}")
         
         print("SFT_ppl: ", ppl)
 
     if args.eval_zero:
-        task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande"]
+        task_list = ["arc_challenge", "arc_easy", "boolq", "winogrande", "piqa"]
         eval_zero_shot(model, task_list)
     
     rt = time.time() - tick1
     print(f"Runtime of training-free construction (ppl): {tick1 - tick:.2f}")
-    print(f"Runtime of fine-tuning construction: {rt:.2f}")
+    print(f"Runtime of fine-tuning construction (ppl): {rt:.2f}")

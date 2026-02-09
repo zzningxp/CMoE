@@ -276,16 +276,69 @@ def lowrank_compress_svd(weight_matrix, lowrank_sparsity, save_path=None):
     return low_rank_matrix.to(weight_matrix.dtype)
 
 @torch.no_grad()
-def analyze_quant_outlier(layer, layer_idx, hidden_states, slice_num, n, if_dense=True, save_path=None):
-    print(f"reconstruct moe from dense layer {layer_idx}")
-    nsample = hidden_states.shape[0]
+def analyze_rates(model, layer_idx, up_proj_rates, new_rates, gate_proj_rates, down_proj_rates, new_expert_sizes, rank_indices_tensor, save_path=None):
+    
+    new_up_proj_rates = up_proj_rates[0][rank_indices_tensor]
+    new_gate_proj_rates = gate_proj_rates[0][rank_indices_tensor]
+    new_down_proj_rates = down_proj_rates[0][rank_indices_tensor]
+    start_id = 0
+    ret0 = []
+    ret1 = []
+    ret2 = []
+    for ii, new_expert_size in enumerate(new_expert_sizes):
+        new_intermediate_size = int(new_expert_size * up_proj_rates[0].shape[0])
+        ret0.append(new_up_proj_rates[start_id:start_id+new_intermediate_size].mean().detach().cpu().numpy().item())
+        ret1.append(new_gate_proj_rates[start_id:start_id+new_intermediate_size].mean().detach().cpu().numpy().item())
+        ret2.append(new_down_proj_rates[start_id:start_id+new_intermediate_size].mean().detach().cpu().numpy().item())
+        start_id += new_intermediate_size
 
+    # 
+    if save_path:
+        plt.figure(figsize=(10, 10))
+        # plt_set = [rates, up_proj_loss, gate_proj_loss]
+        plt_set = [new_rates, new_up_proj_rates, new_gate_proj_rates, new_down_proj_rates]
+        for i, pp in enumerate(plt_set):
+            plt.subplot(len(plt_set), 1, i + 1)
+            pps = pp.detach().cpu().to(dtype=torch.float32).numpy()
+            # pps = sorted(pps, reverse=True)
+
+            neuron_indices = np.arange(pp.shape[0])
+            plt.plot(neuron_indices, pps, 'b-', alpha=0.6)
+            plt.title('Distribution of Neuron Loss Rates')
+            plt.xlabel('Neuron Index')
+            plt.ylabel('Loss')
+            plt.yscale('log')
+            plt.grid(True, alpha=0.3)
+            
+            mean_rate = pps.mean()
+            std_rate = pps.std()
+            stats_text = (f'Mean rate: {mean_rate:.3f}\n'
+                        f'Std rate: {std_rate:.3f}\n'
+                        f'Max rate: {pps.max():.3f}\n'
+                        f'Min rate: {pps.min():.3f}')
+            
+            plt.text(0.95, 0.95, stats_text,
+                    transform=plt.gca().transAxes,
+                    verticalalignment='top',
+                    horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        plt.tight_layout()
+        
+        plt.savefig(save_path)
+        plt.close()
+    
+    return {'up_proj':ret0, 'gate_proj':ret1, 'down_proj':ret2}
+    
+@torch.no_grad()
+def analyze_quant_outlier(layer, layer_idx, hidden_states, slice_num, n, wbits = 8, if_dense=True, filters = ['up_proj', 'gate_proj', 'down_proj'], save_path=None, args=None):
+    nsample = hidden_states.shape[0]
     gptq = {}
-    wbits = 8
+
     groupsize = 128
     act_order = True
     static_groups = False
-    filters = ['up_proj', 'gate_proj', 'down_proj']
+    
     loss = {}
     
     for ff in filters:
@@ -321,12 +374,18 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, slice_num, n, if_dens
 
             for handle in handles:
                 handle.remove()
+            
+            avg_losses = []
+            max_losses = []
             for name in qmodule.keys():
                 loss[name] = gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups, update=False)
+                avg_losses.append(loss[name].sum(dim=1).mean().detach().cpu().numpy().item())
+                max_losses.append(loss[name].sum(dim=1).max().detach().cpu().numpy().item())
                 gptq[name].free()
                 del gptq[name]
             
             tick1 = time.time()
+            # print(f"Simulate quant to find outliers, layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {wbits} time: {tick1 - tick0} avg_loss: {avg_losses} max_loss: {max_losses}")
             print(f"Simulate quant to find outliers, layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {wbits} time: {tick1 - tick0}")
 
         del qmodule_all
@@ -345,11 +404,17 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, slice_num, n, if_dens
             g = f'mlp.experts.{expert_idx}.gate_proj'
             d = f'mlp.experts.{expert_idx}.down_proj'
         
-        up_proj_loss = torch.sum(loss[u], dim=1)
-        gate_proj_loss = torch.sum(loss[g], dim=1)
-        down_proj_loss = torch.sum(loss[d], dim=1)
-        # print(up_proj_loss.shape, gate_proj_loss.shape, down_proj_loss.shape)
-        all_rates.append(up_proj_loss + gate_proj_loss)
+        if d.split('.')[-1] in filters:
+            return_loss = torch.sum(loss[d], dim=0)
+            # return_loss = torch.max(loss[d], dim=0)[0]
+        if u.split('.')[-1] in filters:
+            return_loss = torch.sum(loss[u], dim=1)
+            # return_loss = torch.max(loss[u], dim=1)[0]
+        if g.split('.')[-1] in filters:
+            return_loss = torch.sum(loss[g], dim=1)
+            # return_loss = torch.max(loss[g], dim=1)[0]
+
+        all_rates.append(return_loss)
         # rates = up_proj_loss / up_proj_loss.mean() + gate_proj_loss / gate_proj_loss.mean()
     # print(f"Layer {layer_idx}, neural loss rates: ", all_rates)
 
@@ -361,8 +426,8 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, slice_num, n, if_dens
         for i, pp in enumerate(plt_set):
             plt.subplot(len(plt_set), 1, i + 1)
             pps = pp.detach().cpu().to(dtype=torch.float32).numpy()
-            pps = sorted(pps, reverse=True)
-            fit_data, split_points, fit_line = dp_pareto_step_fit(np.log(pps), slice_num * 2)
+            # pps = sorted(pps, reverse=True)
+            fit_data, split_points, fit_line = dp_pareto_step_fit(np.log(pps), slice_num)
             fit_line = np.exp(fit_line)
 
             neuron_indices = np.arange(pp.shape[0])
@@ -397,8 +462,9 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, slice_num, n, if_dens
 @torch.no_grad()
 def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num, 
                 attn_hidden_states, ffn_hidden_states, attention_mask, position_ids, position_embeddings, 
+                dyn_qscheme,
                 args):
-    print(f"Quantize layer {layer_idx}")
+    print(f"Quantize layer {layer_idx}, slice_expert_num: {slice_expert_num}")
     nsample = attn_hidden_states.shape[0]
     assert attn_hidden_states.shape[0] == ffn_hidden_states.shape[0], f"attn_hidden_states.shape: {attn_hidden_states.shape}, ffn_hidden_states.shape: {ffn_hidden_states.shape}"
 
@@ -417,7 +483,9 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
     qscheme_str = args.quant_scheme
     qscheme_attn = [8]
     qscheme_share = [4]
-    qscheme_expert = [2, 2, 2, 2, 2, 2, 2, 2]
+    qscheme_expert = {'up_proj':[2, 2, 2, 2, 2, 2, 2, 2], 
+                      'gate_proj':[2, 2, 2, 2, 2, 2, 2, 2], 
+                      'down_proj':[2, 2, 2, 2, 2, 2, 2, 2]}
     if qscheme_str is not None:
         try:
             # sample: "a8s4m3221", "a8s4m33222222"
@@ -426,11 +494,17 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
             ss = match.group(2)
             ee = match.group(3)
             qscheme_attn = [int(aa)]
-            qscheme_share = [int(ss)]
-            qscheme_expert = [int(e) for e in ee]
+            qscheme_share = {'up_proj': [int(ss)], 'gate_proj': [int(ss)], 'down_proj': [int(ss)]}
+            qscheme_expert = {'up_proj':[int(e) for e in ee], 
+                            'gate_proj':[int(e) for e in ee], 
+                            'down_proj':[int(e) for e in ee]}
         except:
             print(f"Quant scheme {qscheme_str} is not valid.")
-    
+    if dyn_qscheme is not None:
+        qscheme_share = dyn_qscheme['shared']
+        qscheme_attn = dyn_qscheme['attn']
+        qscheme_expert = dyn_qscheme['expert']
+
     loss = {}
     quanted_size = 0
 
@@ -455,18 +529,20 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                     bit = qscheme_attn
                     gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                     quanted_size += qmodule[name].weight.numel() * (bit[0] + 32 / groupsize) ## sym = False is 32, sym = True has no zero point is 16
-                else:
+                elif split_name in ffn_filters:
                     match = re.search(r'mlp\.experts\.(\d+)', name)
                     expert_id = int(match.group(1)) if match else -1  ## shared expert id is -1
                     if expert_id == -1:
-                        bit = qscheme_share
+                        bit = qscheme_share[split_name]
                         gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                         quanted_size += qmodule[name].weight.numel() * (bit[0] + 32 / groupsize)
                     else:
-                        bit = qscheme_expert
+                        bit = qscheme_expert[split_name]
                         eid = expert_id % slice_expert_num
                         gptq[name].quantizer.configure(bit[eid], perchannel=True, sym=sym, mse=False)
                         quanted_size += qmodule[name].weight.numel() * (bit[eid] + 32 / groupsize)
+                else:
+                    assert False, f"Some modules are not quantize {name}, check code!"
 
             def add_batch(name):
                 def tmp(_, inp, out):
@@ -498,13 +574,18 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
 
             for handle in handles:
                 handle.remove()
+            avg_losses = []
+            max_losses = []
             for name in qmodule.keys():
                 loss[name] = gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups)
+                avg_losses.append(loss[name].sum(dim=1).mean().detach().cpu().numpy().item())
+                max_losses.append(loss[name].sum(dim=1).max().detach().cpu().numpy().item())
                 gptq[name].free()
                 del gptq[name]
             
             tick1 = time.time()
-            print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0} loss: {loss[name].sum()}")
+            # print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0} avg_loss: {avg_losses} max_loss: {max_losses}")
+            print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0}")
 
         del qmodule_all
 

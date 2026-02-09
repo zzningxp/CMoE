@@ -16,50 +16,120 @@ except:
 DEV = torch.device('cuda:0')
 
 @torch.no_grad()
-def reconstruct_dense(model, layer, layer_idx, inps, n_experts, n_activated, slice_expert_num, device, args):
+def dynamic_quant_scheme(model, layer, layer_idx, d_wbit, inps, n_experts, n_activated, slice_expert_num, device, args):
+    d_wbit = 3
+    thr_l = 5
+    thr_h = 50
+    if args.dyn_scheme is not None:
+        try:
+            # sample: "b3l5h50"
+            match = re.search(r'b(\d)l(\d+)h(\d+)', args.dyn_scheme)
+            d_wbit = int(match.group(1))
+            thr_l = int(match.group(2))
+            thr_h = int(match.group(3))
+        except:
+            print(f"Quant scheme {args.dyn_scheme} is not valid.")
+    print(f"d_wbit: {d_wbit}, thr_l: {thr_l}, thr_h: {thr_h}")
 
-    if args.rank_mode == "activation":
-        analyze_sparsity = 0.1
-        rates = analyze_neuron_activations(layer.mlp.act_fn, inps, layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight, sparsity=analyze_sparsity)
-    elif args.rank_mode == "quant_outlier":
-        rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, 1, if_dense=True, save_path=f"plot/_quant_outlier_{layer_idx}.png")
-        rates = rates[0]
-    elif args.rank_mode == "random":
-        rates = torch.randn(layer.mlp.intermediate_size, device=device)
-    elif args.rank_mode == "neuron_index":
-        rates = torch.arange(layer.mlp.intermediate_size, device=device)
+    if args.rank_mode == "quant_outlier":
+        # save_path=f"plot/_{model.config.model_type}_quant_outlier_{layer_idx}.png"
+        save_path = None
+        up_proj_rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, 1, wbits=d_wbit, if_dense=True, filters = ['up_proj'], save_path=save_path, args=args)
+        gate_proj_rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, 1, wbits=d_wbit, if_dense=True, filters = ['gate_proj'], save_path=save_path, args=args)
+        down_proj_rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, 1, wbits=d_wbit, if_dense=True, filters = ['down_proj'], save_path=save_path, args=args)
     else:
-        assert False, f"Unknown rank mode: {args.rank_mode}"
+        assert False, f"Unsupported rank mode in mixqdense: {args.rank_mode}"
 
-    expert_num = slice_expert_num
-    expert_groups, _ = construct_unequal_by_rates(
-        rates,
-        num_experts = expert_num,
-    )
-    
+    intermediate_size = up_proj_rates[0].shape[0]
+    rates = gate_proj_rates[0] + up_proj_rates[0] + down_proj_rates[0]
+    new_rates, rank_indices = torch.topk(rates, intermediate_size)
+    rank_indices_tensor = torch.tensor(rank_indices, dtype=torch.long, device=device)
+
+    new_expert_sizes = [1]
+    assert len(new_expert_sizes) == slice_expert_num
+
+    avg_loss = analyze_rates(model, layer_idx, up_proj_rates, new_rates, gate_proj_rates, down_proj_rates, new_expert_sizes, rank_indices_tensor)                             
+                            #  save_path = f"plot/_{model.config.model_type}_rates_{layer_idx}.png")
+
+    dyn_qscheme = {}
+    for k in avg_loss.keys():
+        dx = []
+        for i in avg_loss[k]:
+            if i < thr_l:
+                dx.append(d_wbit - 1)
+            elif i < thr_h:
+                dx.append(d_wbit)
+            else:
+                dx.append(d_wbit + 1)
+        dyn_qscheme[k] = dx
+    print(avg_loss, "dyn_qscheme", dyn_qscheme)
+
+    return layer.mlp, {'shared': dyn_qscheme, 'attn': [d_wbit], 'expert': None}
+
+
+@torch.no_grad()
+def reconstruct_dense_dynamic_split(model, layer, layer_idx, inps, n_experts, n_activated, slice_expert_num, device, args):
+    if args.rank_mode == "quant_outlier":
+        # save_path=f"plot/_{model.config.model_type}_quant_outlier_{layer_idx}.png", 
+        up_proj_rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, 1, wbits=d_wbit, if_dense=True, filters = ['up_proj'], args=args)
+        gate_proj_rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, 1, wbits=d_wbit, if_dense=True, filters = ['gate_proj'], args=args)
+        down_proj_rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, 1, wbits=d_wbit, if_dense=True, filters = ['down_proj'], args=args)
+    else:
+        assert False, f"Unsupported rank mode in mixqdense: {args.rank_mode}"
+
+    intermediate_size = up_proj_rates[0].shape[0]
+    rates = gate_proj_rates[0] + up_proj_rates[0] + down_proj_rates[0]
+    new_rates, rank_indices = torch.topk(rates, intermediate_size)
+    rank_indices_tensor = torch.tensor(rank_indices, dtype=torch.long, device=device)
+    new_up_proj_weight = layer.mlp.up_proj.weight[rank_indices_tensor, :]
+    new_gate_proj_weight = layer.mlp.gate_proj.weight[rank_indices_tensor, :]
+    new_down_proj_weight = layer.mlp.down_proj.weight[:, rank_indices_tensor]
+
+    # layer.mlp.down_proj.weight = nn.Parameter(new_down_proj_weight)
+    # analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, 1, if_dense=True, filters = ['down_proj'], args=args, save_path=f"plot/_{model.config.model_type}_quant_outlier_{layer_idx}.png")
+
     experts = nn.ModuleList()
-    total_neurons_processed = 0
+    x = 4
+    new_expert_sizes = [1/x, (x-2)/x, 1/x]
+    assert len(new_expert_sizes) == slice_expert_num
 
-    for ii, group_indices in enumerate(expert_groups):
-        new_intermediate_size = len(group_indices)
+    avg_loss = analyze_rates(model, layer_idx, up_proj_rates, new_rates, gate_proj_rates, down_proj_rates, new_expert_sizes, rank_indices_tensor, 
+                             save_path = f"plot/_{model.config.model_type}_rates_{layer_idx}.png")
+
+    expert_qscheme = {}
+    for k in avg_loss.keys():
+        dx = []
+        for i in avg_loss[k]:
+            if i < 5:
+                dx.append(d_wbit - 1)
+            elif i < 50:
+                dx.append(d_wbit)
+            else:
+                dx.append(d_wbit + 1)
+        expert_qscheme[k] = dx
+    dyn_qscheme = {'shared': None, 'attn': [d_wbit], 'expert': expert_qscheme}
+    print(avg_loss)
+    print("dyn_qscheme", dyn_qscheme)
+
+    start_id = 0
+    for ii, new_expert_size in enumerate(new_expert_sizes):
+        new_intermediate_size = int(new_expert_size * intermediate_size)
+
         expert_mlp = MixQDenseMLP(layer.mlp.hidden_size, new_intermediate_size)
 
         with torch.no_grad():
-            group_indices_tensor = torch.tensor(group_indices, dtype=torch.long, device=device)
-            
-            expert_mlp.gate_proj.weight.data = layer.mlp.gate_proj.weight[group_indices_tensor, :]
-            expert_mlp.up_proj.weight.data = layer.mlp.up_proj.weight[group_indices_tensor, :]
-            expert_mlp.down_proj.weight.data = layer.mlp.down_proj.weight[:, group_indices_tensor]
+            expert_mlp.gate_proj.weight.data = new_gate_proj_weight[start_id:start_id+new_intermediate_size, :]
+            expert_mlp.up_proj.weight.data = new_up_proj_weight[start_id:start_id+new_intermediate_size, :]
+            expert_mlp.down_proj.weight.data = new_down_proj_weight[:, start_id:start_id+new_intermediate_size]
             
         experts.append(expert_mlp)
-        total_neurons_processed += new_intermediate_size
+        start_id += new_intermediate_size
         print(ii, new_intermediate_size, expert_mlp.gate_proj.weight.shape, expert_mlp.up_proj.weight.shape, expert_mlp.down_proj.weight.shape)
     
-    # MoE
-    moe = MixQDenseMoEBlock(expert_num).to(device)
+    moe = MixQDenseMoEBlock(slice_expert_num).to(device)
     moe.experts = experts
 
-    return moe
+    return moe, dyn_qscheme
 
 @torch.no_grad()
 def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activated, slice_expert_num, device, args):
@@ -68,7 +138,7 @@ def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activ
         analyze_sparsity = 0.1
         rates = analyze_neuron_activations(layer.mlp.act_fn, inps, layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight, sparsity=analyze_sparsity)
     elif args.rank_mode == "quant_outlier":
-        rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, n_experts // slice_expert_num, if_dense=True, save_path=f"plot/_quant_outlier_{layer_idx}.png")
+        rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, n_experts // slice_expert_num, if_dense=True, args=args) #, save_path=f"plot/_quant_outlier_{layer_idx}.png")
         rates = rates[0]
     elif args.rank_mode == "random":
         rates = torch.randn(layer.mlp.intermediate_size, device=device)
@@ -105,7 +175,7 @@ def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activ
         experts.append(expert_mlp)
         new_expert_intermediate_size = expert_mlp.up_proj.weight.shape[0]
         total_neurons_processed += new_expert_intermediate_size
-        # print(ii, scaling_factor, new_expert_intermediate_size, expert_mlp.gate_proj.weight.shape, expert_mlp.up_proj.weight.shape, expert_mlp.down_proj.weight.shape)
+        print(ii, scaling_factor, new_expert_intermediate_size, expert_mlp.gate_proj.weight.shape, expert_mlp.up_proj.weight.shape, expert_mlp.down_proj.weight.shape)
     
     if model.config.model_type == 'qwen3':
         moe = Qwen3MoeSparseMoeBlock(model.config)
@@ -147,7 +217,7 @@ def reconstruct_moe_from_existing(model, layer, layer_idx, inps, n_experts, n_ac
     tick0 = time.time()
 
     if args.rank_mode == "quant_outlier":
-        all_rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, n_experts // slice_expert_num, if_dense=False, save_path=None)
+        all_rates = analyze_quant_outlier(layer, layer_idx, inps, slice_expert_num, n_experts // slice_expert_num, if_dense=False, save_path=None, args=args)
 
     for expert_idx, expert in enumerate(layer.mlp.experts):
         ori_gate_proj_weights = expert.gate_proj.weight
@@ -346,15 +416,18 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
 
     # print(hidden_states.shape)
     
+    dyn_qscheme = None
+    base_bit = 3
     if moe_model_flag:
         if hasattr(layer.mlp, 'gate') or hasattr(layer.mlp, 'experts'):        
             moe = reconstruct_moe_from_existing(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
+            layer.mlp = moe
     elif args.mixqdense:
-        moe = reconstruct_dense(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
+        # moe, dyn_qscheme = reconstruct_dense_dynamic_split_dense(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
+        _, dyn_qscheme = dynamic_quant_scheme(model, layer, layer_idx, base_bit, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
     else:
         moe = reconstruct_moe_from_dense(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
-    
-    layer.mlp = moe
+        layer.mlp = moe
     
     gc.collect()
     torch.cuda.empty_cache()
@@ -366,6 +439,7 @@ def construct_moe(model, moe_model_flag, layer, layer_idx, inp, attention_mask, 
     if if_quant_layer:
         quanted_size = quant_layer_mix_precision(layer, layer_idx, if_quant_attn, slice_expert_num, 
                     hidden_states_inorm, hidden_states, attention_mask, position_ids, position_embeddings, 
+                    dyn_qscheme,
                     args)
         print(f"Quantized size of layer {layer_idx}: {quanted_size}")
         gc.collect()

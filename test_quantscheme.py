@@ -43,42 +43,33 @@ vol_sizes = {"llama7b": 32000 * 4096,
 
 
 modeltype = "llama7b"
-modeltype = "llama3-8b"
+# modeltype = "llama3-8b"
 modeltype = "qwen3-8b"
-modeltype = "llama2-13b"
+# modeltype = "llama2-13b"
 qscheme_strs = [
-"a8s0m8",
-"a8s0m4",
-"a4s0m4",
+    "a8s0m8",
+    "a4s0m4",
+"a3s0m4",
 "a4s0m3",
+"a4s0m43",
+"a4s0m4333",
+"a4s0m4332",
+"a6s0m6",
+"a4s0m8644",
+"a4s0m6444",
+"a4s0m6433",
+"a4s0m8444",
+"a4s0m8333",
+"a4s0m6333",
 "a4s0m2",
-"a3s0m3",
-"a3s0m2",
-"a2s0m2",
 "a4s0m4422",
 "a4s0m4332",
 "a4s0m4333",
-"a4s0m2334",
 "a4s0m4222",
 "a4s0m4221",
 "a4s0m3333",
 "a4s0m3322",
-"a4s0m3222",
-"a4s0m3221",
-"a3s0m4422",
-"a3s0m4332",
-"a3s0m4222",
-"a3s0m4221",
-"a3s0m3333",
-"a3s0m3332",
-"a3s0m3322",
-"a3s0m3321",
-"a3s0m3221",
-"a4s0m43333333",
-"a3s0m43333333",
-"a3s0m43333332",
-"a4s0m44433222",
-"a3s0m43333222",
+"a4s0m3222"
 ]
 
 # modeltype = "dpsk-moe-16b"
@@ -104,21 +95,21 @@ qscheme_strs = [
 #     "a8s2m2222",
 #     "a8s2m3221"]
 
-modeltype = "qwen3-30b-a3b"
-qscheme_strs = ["a4s0m4",
-                "a4s0m3",
-                "a4s0m2",
-                "a3s0m4",
-                "a3s0m3",
-                "a3s0m2",
-    "a8s4m22",
-    "a8s4m42",
-    "a8s4m32",
-    "a8s2m22",
-    "a8s4m3221",
-    "a8s2m3222",
-    "a8s2m2222",
-    "a8s2m3221"]
+# modeltype = "qwen3-30b-a3b"
+# qscheme_strs = ["a4s0m4",
+#                 "a4s0m3",
+#                 "a4s0m2",
+#                 "a3s0m4",
+#                 "a3s0m3",
+#                 "a3s0m2",
+#     "a8s4m22",
+#     "a8s4m42",
+#     "a8s4m32",
+#     "a8s2m22",
+#     "a8s4m3221",
+#     "a8s2m3222",
+#     "a8s2m2222",
+#     "a8s2m3221"]
 
 print(modeltype)
 for qscheme_str in qscheme_strs:
@@ -133,7 +124,7 @@ for qscheme_str in qscheme_strs:
         ffn_size = ffn_sizes[modeltype]
 
         final_size = 0
-        final_size += vol_sizes[modeltype]
+        # final_size += vol_sizes[modeltype]
         final_size += attn_size * (qscheme_attn[0] + 0.25)
         final_size += shared_sizes[modeltype] * (qscheme_share[0] + 0.25)
 
