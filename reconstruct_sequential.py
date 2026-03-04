@@ -21,7 +21,7 @@ def reconstruct_moe_from_dense(model, layer, layer_idx, inps, n_experts, n_activ
         analyze_sparsity = 0.1
         rates = analyze_neuron_activations(layer.mlp.act_fn, inps, layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight, sparsity=analyze_sparsity)
     elif args.rank_mode == "quant_outlier":
-        rates = analyze_quant_outlier(layer, layer_idx, inps, n_experts // slice_expert_num, if_dense=True, args=args) #, save_path=f"plot/_quant_outlier_{layer_idx}.png")
+        rates = analyze_quant_outlier(layer, layer_idx, inps, n_experts = n_experts // slice_expert_num, if_dense=True, args=args) #, save_path=f"plot/_quant_outlier_{layer_idx}.png")
         rates = rates[0]
     elif args.rank_mode == "random":
         rates = torch.randn(layer.mlp.intermediate_size, device=device)
@@ -100,7 +100,7 @@ def reconstruct_moe_from_existing(model, layer, layer_idx, inps, n_experts, n_ac
     tick0 = time.time()
 
     if args.rank_mode == "quant_outlier":
-        all_rates = analyze_quant_outlier(layer, layer_idx, inps, n_experts // slice_expert_num, if_dense=False, save_path=None, args=args)
+        all_rates = analyze_quant_outlier(layer, layer_idx, inps, n_experts = n_experts // slice_expert_num, if_dense=False, save_path=None, args=args)
 
     for expert_idx, expert in enumerate(layer.mlp.experts):
         ori_gate_proj_weights = expert.gate_proj.weight

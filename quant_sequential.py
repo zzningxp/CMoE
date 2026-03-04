@@ -10,60 +10,187 @@ from eval_reconstruct import ppl_eval
 
 DEV = torch.device('cuda:0')
 
+def assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota):
+    # 固定算子处理顺序，保证正向/反向遍历一致
+    FIXED_OP_ORDER = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 
+                      'up_proj', 'down_proj', 'gate_proj']
+    
+    # 收集并排序所有层ID，保证顺序稳定
+    layer_ids = sorted(gptq_losses_all.keys())
+    
+    # 算子列表：每个元素为 (layer_id, op_name, [(bit, loss, mem), ...])
+    ops = []
+    
+    for layer_id in layer_ids:
+        weight_size = weight_sizes[layer_id]
+        gptq_losses = gptq_losses_all[layer_id]
+        
+        for op_name in FIXED_OP_ORDER:
+
+            available_bits = sorted([int(b) for b in gptq_losses.keys()])
+            options = []
+            
+            for bit in available_bits:
+                if bit not in gptq_losses:
+                    continue
+                
+                # 计算该配置下的显存占用 (字节)
+                # bpw = bit + 0.25, 显存 = 参数量 * bpw / 8
+                weight_count = weight_size[op_name]
+                bpw = bit + 0.25
+                mem_usage = weight_count * bpw / 8.0
+                
+                # 获取loss
+                loss = gptq_losses[bit][op_name]
+                
+                options.append( (bit, loss, mem_usage) )
+            
+            if not options:
+                raise ValueError(f"[配置错误] 算子 {layer_id}/{op_name} 无可用的bit配置")
+            
+            ops.append( (layer_id, op_name, options) )
+
+    # -------------------------- 2. 正向动态规划 --------------------------
+    # dp_steps 保存每一步的状态：dp_steps[i] 是处理完前i个算子后的状态字典
+    # 状态字典结构: {当前总显存: 最小总loss}
+    dp_steps = []
+    dp_steps.append( {0.0: 0.0} )  # 初始状态：0个算子，0显存，0 loss
+    
+    eps = 1e-6  # 浮点数比较容差
+    vram_quota = vram_quota * 1024 * 1024 * 1024  # 转换为字节
+
+    for i in range(len(ops)):
+        _, _, options = ops[i]
+        prev_dp = dp_steps[i]
+        curr_dp = {}
+        
+        for curr_mem, curr_loss in prev_dp.items():
+            for (bit, opt_loss, opt_mem) in options:
+                new_mem = curr_mem + opt_mem
+                
+                # 检查是否超出显存配额（考虑浮点误差）
+                if new_mem > vram_quota + eps:
+                    continue
+                
+                new_loss = curr_loss + opt_loss
+                
+                # 更新当前状态：
+                # 1. 如果该显存未记录，直接记录
+                # 2. 如果该显存已记录，但新loss更小，更新
+                # 3. 如果loss相同，选择更大的显存（更接近配额，潜在更优）
+                if new_mem not in curr_dp:
+                    curr_dp[new_mem] = new_loss
+                else:
+                    if new_loss < curr_dp[new_mem] - eps:
+                        curr_dp[new_mem] = new_loss
+                    elif abs(new_loss - curr_dp[new_mem]) <= eps:
+                        if new_mem > curr_dp[new_mem]:
+                            curr_dp[new_mem] = new_loss
+        
+        if not curr_dp:
+            raise RuntimeError(f"[无解] 处理完第 {i+1} 个算子后无可行配置，请检查显存配额")
+        
+        dp_steps.append(curr_dp)
+
+    # -------------------------- 3. 寻找最优终态 --------------------------
+    final_dp = dp_steps[-1]
+    best_loss = float('inf')
+    best_final_mem = 0.0
+    
+    for mem, loss in final_dp.items():
+        if mem > vram_quota + eps:
+            continue
+        # 优先选loss最小的，loss相同选mem最大的
+        if loss < best_loss - eps:
+            best_loss = loss
+            best_final_mem = mem
+        elif abs(loss - best_loss) <= eps:
+            if mem > best_final_mem:
+                best_final_mem = mem
+    
+    if best_final_mem < eps and len(ops) > 0:
+        raise RuntimeError("[无解] 显存配额过小，无法找到可行配置")
+
+    # -------------------------- 4. 回溯路径获取方案 --------------------------
+    # 初始化结果字典
+    result = {layer_id: {} for layer_id in layer_ids}
+    result_loss = {layer_id: {} for layer_id in layer_ids}
+    current_mem = best_final_mem
+    
+    # 从后往前回溯
+    for i in range(len(ops)-1, -1, -1):
+        layer_id, op_name, options = ops[i]
+        prev_dp = dp_steps[i]
+        found = False
+        
+        for (bit, opt_loss, opt_mem) in options:
+            # 计算前一个状态的显存
+            target_prev_mem = current_mem - opt_mem
+            if target_prev_mem < -eps:
+                continue
+            
+            # 在prev_dp中寻找匹配的状态（考虑浮点误差）
+            for prev_mem_candidate, prev_loss_candidate in prev_dp.items():
+                if abs(prev_mem_candidate - target_prev_mem) > eps:
+                    continue
+                # 2. loss match：prev_loss + opt_loss ≈ current_loss
+                expected_loss = prev_loss_candidate + opt_loss
+                actual_loss = dp_steps[i+1][current_mem]
+                if abs(expected_loss - actual_loss) > eps:
+                    continue
+
+                result[layer_id][op_name] = [bit]
+                result_loss[layer_id][op_name] = opt_loss
+                current_mem = prev_mem_candidate
+                found = True
+                break
+            if found:
+                break
+        
+        if not found:
+            raise RuntimeError(f"[回溯失败] 无法在第 {i+1} 个算子 ({layer_id}/{op_name}) 找到匹配配置")
+
+    # 最终校验：确保所有算子都有结果
+    for layer_id in layer_ids:
+        for op_name in FIXED_OP_ORDER:
+            if op_name not in result[layer_id]:
+                raise RuntimeError(f"[结果缺失] 算子 {layer_id}/{op_name} 未分配到bit配置")
+    
+    print(f"Quantization scheme for all layers: ", result)
+    print(f"Quantization loss for all layers: ", result_loss)
+    print(f"Best total loss: {best_loss:.6f}, Total quantized memory: {best_final_mem} B within quota {vram_quota} B")
+    return result, result_loss
+
 @torch.no_grad()
-def dynamic_quant_scheme(model, layer, layer_idx, d_wbit, inps, slice_expert_num, device, args):
-    d_wbit = 3
-    thr_l = 5
-    thr_h = 50
-    if args.dyn_scheme is not None:
-        try:
-            # sample: "b3l5h50"
-            match = re.search(r'b(\d)l(\d+)h(\d+)', args.dyn_scheme)
-            d_wbit = int(match.group(1))
-            thr_l = int(match.group(2))
-            thr_h = int(match.group(3))
-        except:
-            print(f"Quant scheme {args.dyn_scheme} is not valid.")
-    print(f"d_wbit: {d_wbit}, thr_l: {thr_l}, thr_h: {thr_h}")
+def get_ffn_pre_quant_loss(model, layer, layer_idx, d_wbit, layer_inps, mlp_inps, attention_mask, position_ids, position_embeddings, args):
 
     if args.rank_mode == "quant_outlier":
         # save_path=f"plot/_{model.config.model_type}_quant_outlier_{layer_idx}.png"
         save_path = None
-        up_proj_rates = analyze_quant_outlier(layer, layer_idx, inps, 1, wbits=d_wbit, if_dense=True, filters = ['up_proj'], save_path=save_path, args=args)
-        gate_proj_rates = analyze_quant_outlier(layer, layer_idx, inps, 1, wbits=d_wbit, if_dense=True, filters = ['gate_proj'], save_path=save_path, args=args)
-        down_proj_rates = analyze_quant_outlier(layer, layer_idx, inps, 1, wbits=d_wbit, if_dense=True, filters = ['down_proj'], save_path=save_path, args=args)
+        rates = {}
+        for i in ['q_proj', 'k_proj', 'v_proj', 'o_proj']:
+            rates[i] = analyze_quant_outlier(layer, layer_idx, layer_inps, 
+                                             attention_mask, position_ids, position_embeddings, 
+                                             n_experts = 1, wbits=d_wbit, if_dense=True, 
+                                             filters = [i], save_path=save_path, args=args)
+        for i in ['up_proj', 'gate_proj', 'down_proj']:
+            rates[i] = analyze_quant_outlier(layer, layer_idx, mlp_inps, 
+                                             n_experts = 1, wbits=d_wbit, if_dense=True, 
+                                             filters = [i], save_path=save_path, args=args)
     else:
         assert False, f"Unsupported rank mode in mixqdense: {args.rank_mode}"
 
-    intermediate_size = up_proj_rates[0].shape[0]
-    rates = gate_proj_rates[0] + up_proj_rates[0] + down_proj_rates[0]
-    new_rates, rank_indices = torch.topk(rates, intermediate_size)
-    rank_indices_tensor = torch.tensor(rank_indices, dtype=torch.long, device=device)
+    losses = {}
+    for i in ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'gate_proj', 'down_proj']:
+        losses[i] = rates[i][0].mean().detach().cpu().numpy().item()
 
-    new_expert_sizes = [1]
-    assert len(new_expert_sizes) == slice_expert_num
+    print(f"Layer {layer_idx}, d_wbit: {d_wbit}: {losses}")
 
-    avg_loss = analyze_rates(model, layer_idx, up_proj_rates, new_rates, gate_proj_rates, down_proj_rates, new_expert_sizes, rank_indices_tensor)                             
-                            #  save_path = f"plot/_{model.config.model_type}_rates_{layer_idx}.png")
-
-    dyn_qscheme = {}
-    for k in avg_loss.keys():
-        dx = []
-        for i in avg_loss[k]:
-            if i < thr_l:
-                dx.append(d_wbit - 1)
-            elif i < thr_h:
-                dx.append(d_wbit)
-            else:
-                dx.append(d_wbit + 1)
-        dyn_qscheme[k] = dx
-    print(avg_loss, "dyn_qscheme", dyn_qscheme)
-
-    return layer.mlp, {'shared': dyn_qscheme, 'attn': [d_wbit], 'expert': None}
+    return losses
 
 @torch.no_grad()
-def sequential_layer(model, if_quant_layer, if_quant_attn, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
-                                args):
+def sequential_layer(model, pre_quant_flag, quant_flag, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
+                    dyn_qschemes, args):
     
     modeltype = model.config.model_type
     batchsize = inp.shape[0]
@@ -106,25 +233,28 @@ def sequential_layer(model, if_quant_layer, if_quant_attn, layer, layer_idx, inp
 
     # print(hidden_states.shape)
     
-    dyn_qscheme = None
-    base_bit = 3
-    if args.mixqdense:
-        # moe, dyn_qscheme = reconstruct_dense_dynamic_split_dense(model, layer, layer_idx, hidden_states, n_experts, n_activated, slice_expert_num, device, args)
-        _, dyn_qscheme = dynamic_quant_scheme(model, layer, layer_idx, base_bit, hidden_states, 1, device, args)
-    else:
-        assert False, "Currently only support mixqdense model."
+    gptq_losses = {}
+    quanted_sizes = {}
+    if pre_quant_flag:
+        for base_bit in [2, 3, 4, 5, 6, 8]:
+            gptq_losses[base_bit] = get_ffn_pre_quant_loss(model, layer, layer_idx, base_bit, 
+                                hidden_states_inorm, hidden_states, 
+                                attention_mask, position_ids, position_embeddings, 
+                                args)
+        qmodule_all = find_layers(layer, filters=['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'gate_proj', 'down_proj'])
+        qmodule = {k: qmodule_all[k] for k in list(qmodule_all.keys())}
+        for name in qmodule.keys():
+            sname = name.split('.')[-1]
+            quanted_sizes[sname] = qmodule[sname].weight.numel()
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"Pre-quantization GPTQ losses for layer {layer_idx}: ", gptq_losses)
     
-    gc.collect()
-    torch.cuda.empty_cache()
-
-    # print(layer)
-    
-    if if_quant_layer:
-        quanted_size = quant_layer_mix_precision(layer, layer_idx, if_quant_attn, 1, 
+    if quant_flag:
+        quanted_sizes['all'] = quant_layer_mix_precision(layer, layer_idx, True, 1, 
                     hidden_states_inorm, hidden_states, attention_mask, position_ids, position_embeddings, 
-                    dyn_qscheme,
-                    args)
-        print(f"Quantized size of layer {layer_idx}: {quanted_size}")
+                    dyn_qschemes, args)
+        print(f"Quantized size of layer {layer_idx}: {quanted_sizes['all']}")
         gc.collect()
         torch.cuda.empty_cache()
     
@@ -142,7 +272,7 @@ def sequential_layer(model, if_quant_layer, if_quant_attn, layer, layer_idx, inp
 
     moe_out = moe_out + residual
     # print("moe_out")
-    return moe_out, quanted_size
+    return moe_out, quanted_sizes, gptq_losses
 
 def quant_sequential(model, tokenizer, dataloader, args):
     print('Starting ...')
@@ -202,24 +332,55 @@ def quant_sequential(model, tokenizer, dataloader, args):
     # layers.cuda()
 
     inps = inps.squeeze(1)
-    
-    all_quanted_size = 0
+    inps_ori = inps.clone()
 
+    gptq_losses_all = {}
+    weight_sizes = {}
     for layer_idx, layer in tqdm(enumerate(layers), desc = 'Pre Quant layers...'):
-        moe_out, quanted_size = sequential_layer(model,
-            True, # if_quant_layer
-            True, # if_quant_attn
+        out, quanted_sizes, gptq_losses = sequential_layer(model,
+            True, # pre_quant_flag, pre-quant phase
+            False, # quant_flag, pre-quant phase may quantize layers with quanted input
             layer, 
             layer_idx,
             inps, 
             attention_mask, 
             position_ids,
             position_embeddings,
-            args = args
+            None, # dyn_qschemes
+            args
         )
 
-        all_quanted_size += quanted_size
-        inps = moe_out
+        weight_sizes[layer_idx] = quanted_sizes
+        gptq_losses_all[layer_idx] = gptq_losses
+        inps = out
+        gc.collect()
+        torch.cuda.empty_cache()
+        # time.sleep(60) # wait for a while to let GPU cool down in the computation intensive phase
+
+    # from qconfig import gptq_losses_all, weight_sizes
+    print(f"GPTQ losses for all layers: ", gptq_losses_all)
+    print(f"Weight sizes for all layers: ", weight_sizes)
+    
+    dyn_qschemes, dyn_losses = assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota=args.vram_quota)
+
+    all_quanted_size = 0
+    inps = inps_ori
+    for layer_idx, layer in tqdm(enumerate(layers), desc = 'Actual Quant layers...'):
+        out, quanted_sizes, _ = sequential_layer(model,
+            False, # pre_quant_flag, pre-quant phase
+            True, # quant_flag, actual quantization happens here
+            layer, 
+            layer_idx,
+            inps, 
+            attention_mask, 
+            position_ids,
+            position_embeddings,
+            dyn_qschemes[layer_idx],
+            args
+        )
+
+        all_quanted_size += quanted_sizes['all']
+        inps = out
         gc.collect()
         torch.cuda.empty_cache()
     
@@ -228,7 +389,7 @@ def quant_sequential(model, tokenizer, dataloader, args):
     # if hasattr(model, 'model') and hasattr(model.model, 'embed_tokens'):
     #     all_quanted_size += model.model.vocab_size * model.config.hidden_size * 16
     if hasattr(model, 'lm_head') and hasattr(model.lm_head, 'weight'):
-        all_quanted_size += model.lm_head.weight.numel() * 16 
+        all_quanted_size += model.lm_head.weight.numel() * 16
     print(f"Total quantized size of all layers (+vol emb): {all_quanted_size} b, in GB: {all_quanted_size / 8 / 1024 / 1024 / 1024:.4f}")
 
     # print('Training_free_ppl:')

@@ -58,10 +58,10 @@ if __name__ == '__main__':
         type=float, default=0.001, 
         help='Bias update speed for load balancing. Gamma in paper.'
     )
-    parser.add_argument(        '--nexperts', type=int, default=16,
+    parser.add_argument(        '--nexperts', type=int, default=1,
         help='Total number of experts. N in paper.'
     )
-    parser.add_argument(        '--nactivated', type=int, required=True,
+    parser.add_argument(        '--nactivated', type=int, default=1,
         help='Number of activated routed experts.'
     )
     parser.add_argument(        '--nshared', type=int, default=0,
@@ -81,6 +81,9 @@ if __name__ == '__main__':
     )
     parser.add_argument(        '--mixqdense', action='store_true',
         help='Whether to run mixed quantized dense model.'
+    )
+    parser.add_argument(        '--vram-quota', type=float, default=12,
+                        help='VRAM quota in GB for quantization.'
     )
     parser.add_argument(        '--prefix', type=str, default=None,
         help='Prefix the results folder if needed.'

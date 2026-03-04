@@ -331,14 +331,20 @@ def analyze_rates(model, layer_idx, up_proj_rates, new_rates, gate_proj_rates, d
     return {'up_proj':ret0, 'gate_proj':ret1, 'down_proj':ret2}
     
 @torch.no_grad()
-def analyze_quant_outlier(layer, layer_idx, hidden_states, n_experts, wbits = 8, if_dense=True, filters = ['up_proj', 'gate_proj', 'down_proj'], save_path=None, args=None):
+def analyze_quant_outlier(layer, layer_idx, hidden_states, 
+                          attention_mask = None, position_ids = None, position_embeddings = None, 
+                          n_experts = 1, wbits = 8, if_dense=True, 
+                          filters = [], save_path=None, args=None):
     nsample = hidden_states.shape[0]
     gptq = {}
 
     groupsize = 128
     act_order = True
     static_groups = False
-    
+
+    ffn_filters = ['up_proj', 'gate_proj', 'down_proj']
+    attn_filters = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'kv_a_proj_with_mqa', 'kv_b_proj']
+
     loss = {}
     
     for ff in filters:
@@ -366,7 +372,20 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, n_experts, wbits = 8,
                 handles.append(qmodule[name].register_forward_hook(add_batch(name)))
             
             for isample in range(nsample):
-                if split_name in filters:
+                if split_name in attn_filters:
+                    attn_sample = hidden_states[isample].unsqueeze(0)
+                    try:
+                        layer.self_attn(
+                            hidden_states=attn_sample, 
+                            attention_mask=attention_mask, 
+                            position_ids=position_ids,
+                            position_embeddings=position_embeddings)
+                    except:
+                        layer.self_attn(
+                            hidden_states=attn_sample, 
+                            attention_mask=attention_mask, 
+                            position_ids=position_ids)
+                elif split_name in ffn_filters:
                     ffn_sample = hidden_states[isample].unsqueeze(0)
                     layer.mlp(ffn_sample)
                 else:
@@ -394,29 +413,35 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, n_experts, wbits = 8,
     all_rates = []
     if if_dense:
         assert n_experts == 1, "dense model n_experts == 1"
-    for expert_idx in range(n_experts):
-        if n_experts == 1:
-            u = f'mlp.up_proj'
-            g = f'mlp.gate_proj'
-            d = f'mlp.down_proj'
-        else:
-            u = f'mlp.experts.{expert_idx}.up_proj'
-            g = f'mlp.experts.{expert_idx}.gate_proj'
-            d = f'mlp.experts.{expert_idx}.down_proj'
-        
-        if d.split('.')[-1] in filters:
-            return_loss = torch.sum(loss[d], dim=0)
-            # return_loss = torch.max(loss[d], dim=0)[0]
-        if u.split('.')[-1] in filters:
-            return_loss = torch.sum(loss[u], dim=1)
-            # return_loss = torch.max(loss[u], dim=1)[0]
-        if g.split('.')[-1] in filters:
-            return_loss = torch.sum(loss[g], dim=1)
-            # return_loss = torch.max(loss[g], dim=1)[0]
+    
+    if filters[0] in attn_filters:
+        all_rates.append(torch.sum(loss[name], dim=1))
+    elif filters[0] in ffn_filters:
+        for expert_idx in range(n_experts):
+            if n_experts == 1:
+                u = f'mlp.up_proj'
+                g = f'mlp.gate_proj'
+                d = f'mlp.down_proj'
+            else:
+                u = f'mlp.experts.{expert_idx}.up_proj'
+                g = f'mlp.experts.{expert_idx}.gate_proj'
+                d = f'mlp.experts.{expert_idx}.down_proj'
+            
+            if d.split('.')[-1] in filters:
+                return_loss = torch.sum(loss[d], dim=0)
+                # return_loss = torch.max(loss[d], dim=0)[0]
+            if u.split('.')[-1] in filters:
+                return_loss = torch.sum(loss[u], dim=1)
+                # return_loss = torch.max(loss[u], dim=1)[0]
+            if g.split('.')[-1] in filters:
+                return_loss = torch.sum(loss[g], dim=1)
+                # return_loss = torch.max(loss[g], dim=1)[0]
 
-        all_rates.append(return_loss)
+            all_rates.append(return_loss)
         # rates = up_proj_loss / up_proj_loss.mean() + gate_proj_loss / gate_proj_loss.mean()
     # print(f"Layer {layer_idx}, neural loss rates: ", all_rates)
+    else:
+        assert False, f"Unsupported filter for quant outlier analysis: {filters}"
 
     if save_path:
         rates = all_rates[0]
@@ -500,9 +525,9 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
         except:
             print(f"Quant scheme {qscheme_str} is not valid.")
     if dyn_qscheme is not None:
-        qscheme_share = dyn_qscheme['shared']
-        qscheme_attn = dyn_qscheme['attn']
-        qscheme_expert = dyn_qscheme['expert']
+        qscheme_share = dyn_qscheme
+        qscheme_attn = dyn_qscheme
+        qscheme_expert = {}
 
     loss = {}
     quanted_size = 0
@@ -525,7 +550,7 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                 gptq[name].quantizer = Quantizer()
 
                 if split_name in attn_filters:
-                    bit = qscheme_attn
+                    bit = qscheme_attn[split_name]
                     gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                     quanted_size += qmodule[name].weight.numel() * (bit[0] + 32 / groupsize) ## sym = False is 32, sym = True has no zero point is 16
                 elif split_name in ffn_filters:
@@ -583,7 +608,7 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                 del gptq[name]
             
             tick1 = time.time()
-            print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0}")
+            print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0} loss: {avg_losses}")
 
         del qmodule_all
 
