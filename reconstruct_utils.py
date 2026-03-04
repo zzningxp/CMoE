@@ -331,7 +331,7 @@ def analyze_rates(model, layer_idx, up_proj_rates, new_rates, gate_proj_rates, d
     return {'up_proj':ret0, 'gate_proj':ret1, 'down_proj':ret2}
     
 @torch.no_grad()
-def analyze_quant_outlier(layer, layer_idx, hidden_states, slice_num, n, wbits = 8, if_dense=True, filters = ['up_proj', 'gate_proj', 'down_proj'], save_path=None, args=None):
+def analyze_quant_outlier(layer, layer_idx, hidden_states, n_experts, wbits = 8, if_dense=True, filters = ['up_proj', 'gate_proj', 'down_proj'], save_path=None, args=None):
     nsample = hidden_states.shape[0]
     gptq = {}
 
@@ -393,9 +393,9 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, slice_num, n, wbits =
     # print(loss)
     all_rates = []
     if if_dense:
-        assert n == 1, "dense model n == 1"
-    for expert_idx in range(n):
-        if n == 1:
+        assert n_experts == 1, "dense model n_experts == 1"
+    for expert_idx in range(n_experts):
+        if n_experts == 1:
             u = f'mlp.up_proj'
             g = f'mlp.gate_proj'
             d = f'mlp.down_proj'
@@ -427,7 +427,6 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states, slice_num, n, wbits =
             plt.subplot(len(plt_set), 1, i + 1)
             pps = pp.detach().cpu().to(dtype=torch.float32).numpy()
             # pps = sorted(pps, reverse=True)
-            fit_data, split_points, fit_line = dp_pareto_step_fit(np.log(pps), slice_num)
             fit_line = np.exp(fit_line)
 
             neuron_indices = np.arange(pp.shape[0])
@@ -584,7 +583,6 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                 del gptq[name]
             
             tick1 = time.time()
-            # print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0} avg_loss: {avg_losses} max_loss: {max_losses}")
             print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0}")
 
         del qmodule_all

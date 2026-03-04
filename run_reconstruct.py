@@ -12,7 +12,7 @@ import copy
 
 from reconstruct_utils import *
 from reconstruct_moe_modeling import *
-from reconstruct_sequential import *
+from quant_sequential import *
 from sft_utils import simple_sft
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from eval_reconstruct import ppl_eval, load_model
@@ -125,21 +125,21 @@ if __name__ == '__main__':
     # ori_ppl = cmoe_ppl_eval(model, testloader, args.dataset, args)
     # print(f"Original model ppl on {args.dataset}: {ori_ppl}")
 
-    model = sequential(model, tokenizer, dataloader, args)
+    model = quant_sequential(model, tokenizer, dataloader, args)
     save_model = False
     if save_model:
         carved_save_dir = f"model/carved_{model.config.model_type}_e{args.nexperts}a{args.nactivated}_{args.quant_scheme}"
         print(model)
         model.save_pretrained(carved_save_dir)
         tokenizer.save_pretrained(carved_save_dir)
-        if model.config.model_type == 'qwen3':
-            import json
-            with open(os.path.join(carved_save_dir, 'config.json'), 'r') as f:
-                config = json.load(f)
-                config['model_type'] = 'qwen3_moe'
-                config['architectures'][0] = 'Qwen3MoEForCausalLM'
-            with open(os.path.join(carved_save_dir, 'config.json'), 'w') as f:
-                json.dump(config, f, indent=4)
+        # if model.config.model_type == 'qwen3':
+        #     import json
+        #     with open(os.path.join(carved_save_dir, 'config.json'), 'r') as f:
+        #         config = json.load(f)
+        #         config['model_type'] = 'qwen3_moe'
+        #         config['architectures'][0] = 'Qwen3MoEForCausalLM'
+        #     with open(os.path.join(carved_save_dir, 'config.json'), 'w') as f:
+        #         json.dump(config, f, indent=4)
     
     # print(model)
 
