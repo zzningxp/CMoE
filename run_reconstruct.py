@@ -98,11 +98,14 @@ if __name__ == '__main__':
         type=str, default="quant_outlier",
         help='Rank mode for MoE reconstruction. activation|quant_outlier|random|neuron_index'
     )
-    parser.add_argument(        '--reconstruct_start_layer', type=int, default=0,
-        help='Start layer for reconstruction.'
+    parser.add_argument(        '--profile-pre-quant', action='store_true',
+        help='Whether to profile the quantization loss of layers before quantization. The value is the layer index to profile.'
     )
-    parser.add_argument(        '--reconstruct_end_layer', type=int, default=15,
-        help='End layer for reconstruction.'
+    parser.add_argument(        '--profile-only-quant-layers', type=int, default=None,
+        help='Whether to profile only quantized layers.'
+    )
+    parser.add_argument(        '--profile-only-quant-op', type=str, default=None,
+        help='Whether to profile only quantized ops.'
     )
 
     args = parser.parse_args()
@@ -128,7 +131,7 @@ if __name__ == '__main__':
     # ori_ppl = cmoe_ppl_eval(model, testloader, args.dataset, args)
     # print(f"Original model ppl on {args.dataset}: {ori_ppl}")
 
-    model = quant_sequential(model, tokenizer, dataloader, args)
+    model = quant_sequential(model, tokenizer, dataloader, testloader, args)
     save_model = False
     if save_model:
         carved_save_dir = f"model/carved_{model.config.model_type}_e{args.nexperts}a{args.nactivated}_{args.quant_scheme}"

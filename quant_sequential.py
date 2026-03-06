@@ -6,19 +6,18 @@ import time
 from tqdm import tqdm
 from reconstruct_utils import *
 from datautils import *
-from eval_reconstruct import ppl_eval
+from eval_reconstruct import load_model, ppl_eval
 
 DEV = torch.device('cuda:0')
 
-def assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota):
-    # 固定算子处理顺序，保证正向/反向遍历一致
-    FIXED_OP_ORDER = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 
-                      'up_proj', 'down_proj', 'gate_proj']
-    
-    # 收集并排序所有层ID，保证顺序稳定
+def get_depth_sensitivity(layer_idx, total_layers):
+    norm_pos = layer_idx / max(total_layers - 1, 1)
+    sensitivity = 1.0 + 2.0 * norm_pos
+    return sensitivity
+
+def assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota, FIXED_OP_ORDER, OP_SENSITIVITY_WEIGHTS, FIXED_BITS):
     layer_ids = sorted(gptq_losses_all.keys())
     
-    # 算子列表：每个元素为 (layer_id, op_name, [(bit, loss, mem), ...])
     ops = []
     
     for layer_id in layer_ids:
@@ -31,19 +30,20 @@ def assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota
             options = []
             
             for bit in available_bits:
+                if bit not in FIXED_BITS:
+                    continue
                 if bit not in gptq_losses:
                     continue
                 
-                # 计算该配置下的显存占用 (字节)
-                # bpw = bit + 0.25, 显存 = 参数量 * bpw / 8
                 weight_count = weight_size[op_name]
-                bpw = bit + 0.25
+                bpw = bit + 16.0 * 2 / 128.0
                 mem_usage = weight_count * bpw / 8.0
                 
-                # 获取loss
-                loss = gptq_losses[bit][op_name]
+                revised_loss = gptq_losses[bit][op_name]
+                revised_loss = revised_loss * OP_SENSITIVITY_WEIGHTS.get(op_name, 1.0)
+                # revised_loss = revised_loss * get_depth_sensitivity(layer_id, len(layer_ids))
                 
-                options.append( (bit, loss, mem_usage) )
+                options.append( (bit, revised_loss, mem_usage) )
             
             if not options:
                 raise ValueError(f"[配置错误] 算子 {layer_id}/{op_name} 无可用的bit配置")
@@ -54,10 +54,10 @@ def assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota
     # dp_steps 保存每一步的状态：dp_steps[i] 是处理完前i个算子后的状态字典
     # 状态字典结构: {当前总显存: 最小总loss}
     dp_steps = []
-    dp_steps.append( {0.0: 0.0} )  # 初始状态：0个算子，0显存，0 loss
+    dp_steps.append( {0.0: 0.0} )
     
     eps = 1e-6  # 浮点数比较容差
-    vram_quota = vram_quota * 1024 * 1024 * 1024  # 转换为字节
+    vram_quota = vram_quota * 1024 * 1024 * 1024  
 
     for i in range(len(ops)):
         _, _, options = ops[i]
@@ -68,7 +68,6 @@ def assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota
             for (bit, opt_loss, opt_mem) in options:
                 new_mem = curr_mem + opt_mem
                 
-                # 检查是否超出显存配额（考虑浮点误差）
                 if new_mem > vram_quota + eps:
                     continue
                 
@@ -156,8 +155,12 @@ def assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota
             if op_name not in result[layer_id]:
                 raise RuntimeError(f"[结果缺失] 算子 {layer_id}/{op_name} 未分配到bit配置")
     
-    print(f"Quantization scheme for all layers: ", result)
-    print(f"Quantization loss for all layers: ", result_loss)
+    for layer_id in layer_ids:
+        print(f"Layer {layer_id}: ", end="")
+        for op_name in FIXED_OP_ORDER:
+            print(f"{op_name}: {result[layer_id][op_name]} ({result_loss[layer_id][op_name]:.3f}) ", end="")
+        print()
+
     print(f"Best total loss: {best_loss:.6f}, Total quantized memory: {best_final_mem} B within quota {vram_quota} B")
     return result, result_loss
 
@@ -245,12 +248,15 @@ def sequential_layer(model, pre_quant_flag, quant_flag, layer, layer_idx, inp, a
         qmodule = {k: qmodule_all[k] for k in list(qmodule_all.keys())}
         for name in qmodule.keys():
             sname = name.split('.')[-1]
-            quanted_sizes[sname] = qmodule[sname].weight.numel()
+            quanted_sizes[sname] = qmodule[name].weight.numel()
         gc.collect()
         torch.cuda.empty_cache()
         print(f"Pre-quantization GPTQ losses for layer {layer_idx}: ", gptq_losses)
     
     if quant_flag:
+        if pre_quant_flag:
+            test_bit = 3 # test bit width
+            dyn_qschemes = {'q_proj': [test_bit], 'k_proj': [test_bit], 'v_proj': [test_bit], 'o_proj': [test_bit], 'up_proj': [test_bit], 'gate_proj': [test_bit], 'down_proj': [test_bit]}
         quanted_sizes['all'] = quant_layer_mix_precision(layer, layer_idx, True, 1, 
                     hidden_states_inorm, hidden_states, attention_mask, position_ids, position_embeddings, 
                     dyn_qschemes, args)
@@ -274,7 +280,7 @@ def sequential_layer(model, pre_quant_flag, quant_flag, layer, layer_idx, inp, a
     # print("moe_out")
     return moe_out, quanted_sizes, gptq_losses
 
-def quant_sequential(model, tokenizer, dataloader, args):
+def quant_sequential(model, tokenizer, dataloader, testloader, args):
     print('Starting ...')
 
     use_cache = model.config.use_cache
@@ -336,32 +342,57 @@ def quant_sequential(model, tokenizer, dataloader, args):
 
     gptq_losses_all = {}
     weight_sizes = {}
-    for layer_idx, layer in tqdm(enumerate(layers), desc = 'Pre Quant layers...'):
-        out, quanted_sizes, gptq_losses = sequential_layer(model,
-            True, # pre_quant_flag, pre-quant phase
-            False, # quant_flag, pre-quant phase may quantize layers with quanted input
-            layer, 
-            layer_idx,
-            inps, 
-            attention_mask, 
-            position_ids,
-            position_embeddings,
-            None, # dyn_qschemes
-            args
-        )
+    op_bits = [3, 4, 5, 6]
+    if args.profile_pre_quant:
+        for layer_idx, layer in tqdm(enumerate(layers), desc = 'Pre Quant layers...'):
+            out, quanted_sizes, gptq_losses = sequential_layer(model,
+                True, # pre_quant_flag, pre-quant phase
+                True, # quant_flag, pre-quant phase may quantize layers with quanted input
+                layer, 
+                layer_idx,
+                inps, 
+                attention_mask, 
+                position_ids,
+                position_embeddings,
+                None, # dyn_qschemes
+                args
+            )
 
-        weight_sizes[layer_idx] = quanted_sizes
-        gptq_losses_all[layer_idx] = gptq_losses
-        inps = out
-        gc.collect()
-        torch.cuda.empty_cache()
-        # time.sleep(60) # wait for a while to let GPU cool down in the computation intensive phase
+            weight_sizes[layer_idx] = quanted_sizes
+            gptq_losses_all[layer_idx] = gptq_losses
+            inps = out
+            gc.collect()
+            torch.cuda.empty_cache()
+    else:
+        from qsample import gptq_losses_all, weight_sizes
 
-    # from qconfig import gptq_losses_all, weight_sizes
-    print(f"GPTQ losses for all layers: ", gptq_losses_all)
-    print(f"Weight sizes for all layers: ", weight_sizes)
-    
-    dyn_qschemes, dyn_losses = assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota=args.vram_quota)
+        # print(f"GPTQ losses for all layers: ", gptq_losses_all)
+        # print(f"Weight sizes for all layers: ", weight_sizes)
+
+    ops = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'down_proj', 'gate_proj']
+    profile_base_bit = 4
+    profile_low_bit = 2
+    dyn_qschemes = {layer_idx: {op_name: [profile_base_bit] for op_name in ops} for layer_idx in range(len(layers))}
+    print(args.profile_only_quant_layers, args.profile_only_quant_op)
+    if args.profile_only_quant_layers == None and args.profile_only_quant_op == None:
+        sensitivity = {
+            'q_proj': 0.4,
+            'k_proj': 1.6,
+            'v_proj': 1.4,
+            'o_proj': 0.8,
+            'up_proj': 2.0,
+            'down_proj': 4.0,
+            'gate_proj': 2.0,    
+            }
+        dyn_qschemes, dyn_losses = assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, args.vram_quota, ops, sensitivity, op_bits)
+    elif args.profile_only_quant_layers != None:
+        if args.profile_only_quant_layers >= len(layers):
+            raise ValueError(f"Invalid layer index for profiling: {args.profile_only_quant_layers}, total layers: {len(layers)}")
+        dyn_qschemes[args.profile_only_quant_layers] = {op_name: [profile_low_bit] for op_name in ops}
+    elif args.profile_only_quant_op != None:
+        for layer_idx in range(len(layers)):
+            dyn_qschemes[layer_idx][args.profile_only_quant_op] = [profile_low_bit]
+    print(f"Dynamic quantization schemes for each layer and op: ", dyn_qschemes)
 
     all_quanted_size = 0
     inps = inps_ori
@@ -383,7 +414,7 @@ def quant_sequential(model, tokenizer, dataloader, args):
         inps = out
         gc.collect()
         torch.cuda.empty_cache()
-    
+
     print(f"Total quantized size of all quanted layers: {all_quanted_size} b, in GB: {all_quanted_size / 8 / 1024 / 1024 / 1024:.4f}")
     # From model.lm_head and vocab_embedding, unquantized with fp16 size, most of models used same weights
     # if hasattr(model, 'model') and hasattr(model.model, 'embed_tokens'):
