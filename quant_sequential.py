@@ -192,7 +192,7 @@ def get_ffn_pre_quant_loss(model, layer, layer_idx, d_wbit, layer_inps, mlp_inps
     return losses
 
 @torch.no_grad()
-def sequential_layer(model, pre_quant_flag, quant_flag, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
+def sequential_layer(model, pre_quant_flag, op_bits, quant_flag, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
                     dyn_qschemes, args):
     
     modeltype = model.config.model_type
@@ -239,7 +239,7 @@ def sequential_layer(model, pre_quant_flag, quant_flag, layer, layer_idx, inp, a
     gptq_losses = {}
     quanted_sizes = {}
     if pre_quant_flag:
-        for base_bit in [2, 3, 4, 5, 6, 8]:
+        for base_bit in op_bits:
             gptq_losses[base_bit] = get_ffn_pre_quant_loss(model, layer, layer_idx, base_bit, 
                                 hidden_states_inorm, hidden_states, 
                                 attention_mask, position_ids, position_embeddings, 
@@ -347,6 +347,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
         for layer_idx, layer in tqdm(enumerate(layers), desc = 'Pre Quant layers...'):
             out, quanted_sizes, gptq_losses = sequential_layer(model,
                 True, # pre_quant_flag, pre-quant phase
+                op_bits, #
                 True, # quant_flag, pre-quant phase may quantize layers with quanted input
                 layer, 
                 layer_idx,
@@ -364,7 +365,9 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
             gc.collect()
             torch.cuda.empty_cache()
     else:
-        from qsample import gptq_losses_all, weight_sizes
+        from qsample import _gptq_losses_all, _weight_sizes
+        gptq_losses_all = _gptq_losses_all[model.model_id]
+        weight_sizes = _weight_sizes[model.model_id]
 
         # print(f"GPTQ losses for all layers: ", gptq_losses_all)
         # print(f"Weight sizes for all layers: ", weight_sizes)
@@ -377,18 +380,20 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
     if args.profile_only_quant_layers == None and args.profile_only_quant_op == None:
         sensitivity = {
             'q_proj': 0.4,
-            'k_proj': 1.6,
+            'k_proj': 0.4,
             'v_proj': 1.4,
             'o_proj': 0.8,
             'up_proj': 2.0,
             'down_proj': 4.0,
-            'gate_proj': 2.0,    
+            'gate_proj': 2.0,
             }
         dyn_qschemes, dyn_losses = assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, args.vram_quota, ops, sensitivity, op_bits)
     elif args.profile_only_quant_layers != None:
         if args.profile_only_quant_layers >= len(layers):
             raise ValueError(f"Invalid layer index for profiling: {args.profile_only_quant_layers}, total layers: {len(layers)}")
-        dyn_qschemes[args.profile_only_quant_layers] = {op_name: [profile_low_bit] for op_name in ops}
+        if args.profile_only_quant_layers != -1:
+            dyn_qschemes[args.profile_only_quant_layers] = {op_name: [profile_low_bit] for op_name in ops}
+        ## profile_only_quant_layers == -1, profile all layers
     elif args.profile_only_quant_op != None:
         for layer_idx in range(len(layers)):
             dyn_qschemes[layer_idx][args.profile_only_quant_op] = [profile_low_bit]
@@ -399,6 +404,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
     for layer_idx, layer in tqdm(enumerate(layers), desc = 'Actual Quant layers...'):
         out, quanted_sizes, _ = sequential_layer(model,
             False, # pre_quant_flag, pre-quant phase
+            None, #
             True, # quant_flag, actual quantization happens here
             layer, 
             layer_idx,

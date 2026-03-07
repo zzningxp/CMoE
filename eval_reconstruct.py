@@ -300,29 +300,46 @@ def load_model(model_path):
     if 'llava' in model_path.lower():
         model = get_llava(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model.model_id = 'llava'
     elif 'olmoe' in model_path.lower():
         model = get_olmoe(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model.model_id = 'olmoe-7b-1b'
     elif "deepseek-moe-16b" in model_path.lower():
         model = get_deepseek_moe_16b(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model.model_id = 'deepseek-moe-16b'
     elif 'deepseek-v2-lite' in model_path.lower():
         model, tokenizer = get_deepseek_v2_lite(model_path)
+        model.model_id = 'deepseek-v2-lite'
     elif 'llama' in model_path.lower():
         model = get_llama(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+        if 'llama-2-7b' in model_path.lower():
+            model.model_id = 'llama-2-7b'
+        if 'llama-2-13b' in model_path.lower():
+            model.model_id = 'llama-2-13b'
+        if 'llama-3-8b' in model_path.lower():
+            model.model_id = 'llama-3-8b'
     elif 'qwen3-30b-a3b' in model_path.lower():
         model = get_qwen3_30b_a3b(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model.model_id = 'qwen3-30b-a3b'
     elif 'qwen3_moe' in model_path.lower():
         model = get_qwen3_moe(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model.model_id = 'qwen3-moe'
     elif 'qwen3' in model_path.lower():
         model = get_qwen3(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
+        if 'qwen3-4b' in model_path.lower():
+            model.model_id = 'qwen3-4b'
+        elif 'qwen3-8b' in model_path.lower():
+            model.model_id = 'qwen3-8b'
     elif 'moonlight' in model_path.lower():
         model = get_moonlight(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        model.model_id = 'moonlight'
     else:
         assert False, "Model type not supported."
     model.eval()
@@ -367,7 +384,7 @@ if __name__ == '__main__':
             )
             print(dataset)
             eval_set = dataset
-            ppl_i = cmoe_ppl_eval(model, testloader, eval_set, args)
+            ppl_i = ppl_eval(model, testloader, eval_set, args)
             ppl.append(f"{dataset}: {ppl_i}")
             print("PPL on {}: {:.4f}".format(dataset, ppl_i))
 

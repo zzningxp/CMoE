@@ -128,7 +128,7 @@ if __name__ == '__main__':
     print("cali_data: ", args.dataset)
 
     tick = time.time()
-    # ori_ppl = cmoe_ppl_eval(model, testloader, args.dataset, args)
+    # ori_ppl = ppl_eval(model, testloader, args.dataset, args)
     # print(f"Original model ppl on {args.dataset}: {ori_ppl}")
 
     model = quant_sequential(model, tokenizer, dataloader, testloader, args)
