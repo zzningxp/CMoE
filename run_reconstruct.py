@@ -13,7 +13,6 @@ import copy
 from reconstruct_utils import *
 from reconstruct_moe_modeling import *
 from quant_sequential import *
-from sft_utils import simple_sft
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from eval_reconstruct import ppl_eval, load_model
 
@@ -98,9 +97,6 @@ if __name__ == '__main__':
         type=str, default="quant_outlier",
         help='Rank mode for MoE reconstruction. activation|quant_outlier|random|neuron_index'
     )
-    parser.add_argument(        '--profile-pre-quant', action='store_true',
-        help='Whether to profile the quantization loss of layers before quantization. The value is the layer index to profile.'
-    )
     parser.add_argument(        '--profile-only-quant-layers', type=int, default=None,
         help='Whether to profile only quantized layers.'
     )
@@ -156,6 +152,7 @@ if __name__ == '__main__':
         print('Starting SFT...')    
 
         model.cuda()
+        from sft_utils import simple_sft
         model = simple_sft(model, tokenizer, args, epoch = args.epoch)
 
         model.eval()

@@ -6,3 +6,4 @@ model/
 logs/
 
 run.*.sh
+*.json

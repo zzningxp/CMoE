@@ -1,3 +1,4 @@
+import json
 from reconstruct_sequential import construct_moe
 import torch
 import torch.nn as nn
@@ -192,7 +193,7 @@ def get_ffn_pre_quant_loss(model, layer, layer_idx, d_wbit, layer_inps, mlp_inps
     return losses
 
 @torch.no_grad()
-def sequential_layer(model, pre_quant_flag, op_bits, quant_flag, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
+def sequential_layer(model, pre_quant_flag, op_bits, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
                     dyn_qschemes, args):
     
     modeltype = model.config.model_type
@@ -253,10 +254,7 @@ def sequential_layer(model, pre_quant_flag, op_bits, quant_flag, layer, layer_id
         torch.cuda.empty_cache()
         print(f"Pre-quantization GPTQ losses for layer {layer_idx}: ", gptq_losses)
     
-    if quant_flag:
-        if pre_quant_flag:
-            test_bit = 3 # test bit width
-            dyn_qschemes = {'q_proj': [test_bit], 'k_proj': [test_bit], 'v_proj': [test_bit], 'o_proj': [test_bit], 'up_proj': [test_bit], 'gate_proj': [test_bit], 'down_proj': [test_bit]}
+    if not pre_quant_flag:
         quanted_sizes['all'] = quant_layer_mix_precision(layer, layer_idx, True, 1, 
                     hidden_states_inorm, hidden_states, attention_mask, position_ids, position_embeddings, 
                     dyn_qschemes, args)
@@ -343,12 +341,20 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
     gptq_losses_all = {}
     weight_sizes = {}
     op_bits = [3, 4, 5, 6]
-    if args.profile_pre_quant:
+    loss_file = f"loss_{model.model_id}.json"
+    _loss_all = {}
+    try:
+        with open(loss_file, 'r') as f:
+            _loss_all = json.load(f)
+            gptq_losses_all = _loss_all['gptq_losses_all']
+            weight_sizes = _loss_all['weight_sizes']
+        print(f"Loaded quantization data from files for model: {model.model_id}")
+    except:
+        print(f"Can NOT Loaded quantization data, run pre-quantization profiling for model: {model.model_id}")
         for layer_idx, layer in tqdm(enumerate(layers), desc = 'Pre Quant layers...'):
             out, quanted_sizes, gptq_losses = sequential_layer(model,
                 True, # pre_quant_flag, pre-quant phase
                 op_bits, #
-                True, # quant_flag, pre-quant phase may quantize layers with quanted input
                 layer, 
                 layer_idx,
                 inps, 
@@ -364,13 +370,14 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
             inps = out
             gc.collect()
             torch.cuda.empty_cache()
-    else:
-        from qsample import _gptq_losses_all, _weight_sizes
-        gptq_losses_all = _gptq_losses_all[model.model_id]
-        weight_sizes = _weight_sizes[model.model_id]
+        
+        _loss_all['gptq_losses_all'] = gptq_losses_all
+        _loss_all['weight_sizes'] = weight_sizes
+        with open(loss_file, 'w') as f:
+            json.dump(_loss_all, f)
 
-        # print(f"GPTQ losses for all layers: ", gptq_losses_all)
-        # print(f"Weight sizes for all layers: ", weight_sizes)
+    print(f"GPTQ losses for all layers: ", gptq_losses_all)
+    print(f"Weight sizes for all layers: ", weight_sizes)
 
     ops = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'down_proj', 'gate_proj']
     profile_base_bit = 4
@@ -405,7 +412,6 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
         out, quanted_sizes, _ = sequential_layer(model,
             False, # pre_quant_flag, pre-quant phase
             None, #
-            True, # quant_flag, actual quantization happens here
             layer, 
             layer_idx,
             inps, 
