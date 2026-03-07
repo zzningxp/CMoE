@@ -57,7 +57,7 @@ def assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota
     dp_steps = []
     dp_steps.append( {0.0: 0.0} )
     
-    eps = 1e-6  # 浮点数比较容差
+    eps = 1e-6
     vram_quota = vram_quota * 1024 * 1024 * 1024  
 
     for i in range(len(ops)):
@@ -112,24 +112,21 @@ def assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota
         raise RuntimeError("[无解] 显存配额过小，无法找到可行配置")
 
     # -------------------------- 4. 回溯路径获取方案 --------------------------
-    # 初始化结果字典
+    # 
     result = {layer_id: {} for layer_id in layer_ids}
     result_loss = {layer_id: {} for layer_id in layer_ids}
     current_mem = best_final_mem
     
-    # 从后往前回溯
     for i in range(len(ops)-1, -1, -1):
         layer_id, op_name, options = ops[i]
         prev_dp = dp_steps[i]
         found = False
         
         for (bit, opt_loss, opt_mem) in options:
-            # 计算前一个状态的显存
             target_prev_mem = current_mem - opt_mem
             if target_prev_mem < -eps:
                 continue
             
-            # 在prev_dp中寻找匹配的状态（考虑浮点误差）
             for prev_mem_candidate, prev_loss_candidate in prev_dp.items():
                 if abs(prev_mem_candidate - target_prev_mem) > eps:
                     continue
@@ -193,7 +190,7 @@ def get_ffn_pre_quant_loss(model, layer, layer_idx, d_wbit, layer_inps, mlp_inps
     return losses
 
 @torch.no_grad()
-def sequential_layer(model, pre_quant_flag, op_bits, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
+def sequential_layer(model, pre_quant_flag, op_bits, ops, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
                     dyn_qschemes, args):
     
     modeltype = model.config.model_type
@@ -245,7 +242,7 @@ def sequential_layer(model, pre_quant_flag, op_bits, layer, layer_idx, inp, atte
                                 hidden_states_inorm, hidden_states, 
                                 attention_mask, position_ids, position_embeddings, 
                                 args)
-        qmodule_all = find_layers(layer, filters=['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'gate_proj', 'down_proj'])
+        qmodule_all = find_layers(layer, filters=ops)
         qmodule = {k: qmodule_all[k] for k in list(qmodule_all.keys())}
         for name in qmodule.keys():
             sname = name.split('.')[-1]
@@ -341,6 +338,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
     gptq_losses_all = {}
     weight_sizes = {}
     op_bits = [3, 4, 5, 6]
+    ops = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'down_proj', 'gate_proj']
     loss_file = f"loss_{model.model_id}.json"
     _loss_all = {}
     try:
@@ -355,6 +353,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
             out, quanted_sizes, gptq_losses = sequential_layer(model,
                 True, # pre_quant_flag, pre-quant phase
                 op_bits, #
+                ops,
                 layer, 
                 layer_idx,
                 inps, 
@@ -379,7 +378,6 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
     print(f"GPTQ losses for all layers: ", gptq_losses_all)
     print(f"Weight sizes for all layers: ", weight_sizes)
 
-    ops = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'down_proj', 'gate_proj']
     profile_base_bit = 4
     profile_low_bit = 2
     dyn_qschemes = {layer_idx: {op_name: [profile_base_bit] for op_name in ops} for layer_idx in range(len(layers))}
@@ -411,7 +409,8 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
     for layer_idx, layer in tqdm(enumerate(layers), desc = 'Actual Quant layers...'):
         out, quanted_sizes, _ = sequential_layer(model,
             False, # pre_quant_flag, pre-quant phase
-            None, #
+            None,
+            None,
             layer, 
             layer_idx,
             inps, 
