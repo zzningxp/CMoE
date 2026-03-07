@@ -18,12 +18,16 @@ def get_depth_sensitivity(layer_idx, total_layers):
 
 def assign_quant_scheme_from_gptq_loss(gptq_losses_all, weight_sizes, vram_quota, FIXED_OP_ORDER, OP_SENSITIVITY_WEIGHTS, FIXED_BITS):
     layer_ids = sorted(gptq_losses_all.keys())
+    layer_ids = [int(i) for i in layer_ids]
+    weight_sizes = {int(k): v for k, v in weight_sizes.items()}
+    gptq_losses_all = {int(k): v for k, v in gptq_losses_all.items()}
     
     ops = []
     
     for layer_id in layer_ids:
         weight_size = weight_sizes[layer_id]
         gptq_losses = gptq_losses_all[layer_id]
+        gptq_losses = {int(k): v for k, v in gptq_losses.items()}
         
         for op_name in FIXED_OP_ORDER:
 
