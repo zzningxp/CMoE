@@ -1,5 +1,6 @@
 # Adapted from https://github.com/IST-DASLab/gptq
 import math
+import os
 import time
 
 import torch
@@ -13,6 +14,19 @@ DEBUG = False
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
+
+
+def save_gptq_export_bundle(export_store: dict, export_dir: str, model_id: str, export_file: str = "gptq_export.pt") -> str:
+    os.makedirs(export_dir, exist_ok=True)
+    export_path = os.path.join(export_dir, export_file)
+    payload = {
+        "model_id": str(model_id),
+        "tensor_count": len(export_store),
+        "tensors": export_store,
+    }
+    torch.save(payload, export_path)
+    print(f"[GPTQ Export] Saved bundle with {len(export_store)} tensors -> {export_path}")
+    return export_path
 
 
 def quantize(x, scale, zero, maxq):
@@ -154,6 +168,14 @@ class GPTQ:
         # [K, K]
         self.H = torch.zeros((self.columns, self.columns), device=self.dev)
         self.nsamples = 0
+        self._export_gptq_data = False
+        self._export_gptq_dir = "gptq_export"
+        self._export_gptq_store = None
+
+    def set_export(self, enabled: bool = False, export_dir: str = "gptq_export", export_store: dict = None):
+        self._export_gptq_data = bool(enabled)
+        self._export_gptq_dir = export_dir if export_dir else "gptq_export"
+        self._export_gptq_store = export_store
 
     def add_batch(self, inp, out):
         if DEBUG:
@@ -210,6 +232,23 @@ class GPTQ:
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
+        export_enabled = bool(getattr(self, "_export_gptq_data", False))
+        maxq_int = int(self.quantizer.maxq.item()) if self.quantizer.maxq.numel() == 1 else int(torch.max(self.quantizer.maxq).item())
+
+        if export_enabled and groupsize <= 0:
+            raise ValueError("GPTQ export requires groupsize > 0.")
+        if export_enabled and maxq_int < 0:
+            raise ValueError("GPTQ export does not support trits quantizer (maxq < 0).")
+        if export_enabled and actorder and not static_groups:
+            raise ValueError("GPTQ export requires static_groups=True when actorder=True.")
+
+        Q_int = None
+        col_scales = None
+        col_zeros = None
+        if export_enabled:
+            Q_int = torch.zeros((self.rows, self.columns), dtype=torch.uint8, device=self.dev)
+            col_scales = torch.empty((self.rows, self.columns), dtype=torch.float16, device=self.dev)
+            col_zeros = torch.empty((self.rows, self.columns), dtype=torch.float16, device=self.dev)
 
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
@@ -253,6 +292,15 @@ class GPTQ:
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
+                if export_enabled:
+                    col = i1 + i
+                    scale_col = self.quantizer.scale.flatten().to(torch.float32)
+                    zero_col = self.quantizer.zero.flatten().to(torch.float32)
+                    col_scales[:, col] = scale_col.to(torch.float16)
+                    col_zeros[:, col] = zero_col.to(torch.float16)
+                    q_int_col = torch.clamp(torch.round(w / scale_col) + zero_col, 0, maxq_int).to(torch.uint8)
+                    Q_int[:, col] = q_int_col
+
                 err1 = (w - q) / d
                 W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                 Err1[:, i] = err1
@@ -273,6 +321,55 @@ class GPTQ:
 
         if actorder:
             Q = Q[:, invperm]
+            if export_enabled:
+                Q_int = Q_int[:, invperm]
+                col_scales = col_scales[:, invperm]
+                col_zeros = col_zeros[:, invperm]
+
+        if export_enabled:
+            num_groups = math.ceil(self.columns / groupsize)
+            group_scales = []
+            group_zeros = []
+            for gidx in range(num_groups):
+                c0 = gidx * groupsize
+                c1 = min(c0 + groupsize, self.columns)
+                group_scales.append(col_scales[:, c0])
+                group_zeros.append(col_zeros[:, c0])
+                if c1 - c0 > 1:
+                    scale_ref = col_scales[:, c0:c0 + 1]
+                    zero_ref = col_zeros[:, c0:c0 + 1]
+                    if (not torch.allclose(col_scales[:, c0:c1], scale_ref.expand(-1, c1 - c0), rtol=0.0, atol=0.0) or
+                        not torch.allclose(col_zeros[:, c0:c1], zero_ref.expand(-1, c1 - c0), rtol=0.0, atol=0.0)):
+                        raise ValueError(
+                            f"Found non-uniform per-column scale/zero inside group for {name}. "
+                            "Please disable actorder or enable static_groups."
+                        )
+
+            bits = int(math.log2(maxq_int + 1))
+            all_scale_tensor = torch.stack(group_scales, dim=1).to(torch.float16).cpu()
+            all_zero_tensor = torch.stack(group_zeros, dim=1).to(torch.float16).cpu()
+            all_q_int = Q_int.cpu()
+
+            export_payload = {
+                'name': name,
+                'shape': tuple(self.layer.weight.shape),
+                'scale': all_scale_tensor,
+                'zero': all_zero_tensor,
+                'q_int': all_q_int,
+                'groupsize': groupsize,
+                'bits': bits,
+            }
+            export_store = getattr(self, "_export_gptq_store", None)
+            if export_store is not None:
+                export_store[name] = export_payload
+                print(f"[GPTQ Export] Cached {name} (bits={bits})")
+            else:
+                export_dir = getattr(self, "_export_gptq_dir", "gptq_export")
+                os.makedirs(export_dir, exist_ok=True)
+                safe_name = name.replace('.', '_').replace('/', '_')
+                export_path = os.path.join(export_dir, f"{safe_name}.pt")
+                torch.save(export_payload, export_path)
+                print(f"[GPTQ Export] Saved {name} -> {export_path} (bits={bits})")
 
         if update:
             self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
@@ -373,6 +470,8 @@ def llama_sequential(args, model, dataloader, dev):
     if args.quant_attn:
         filters.extend(['q_proj', 'k_proj', 'v_proj', 'o_proj', 'kv_a_proj_with_mqa', 'kv_b_proj'])
 
+    export_enabled = bool(getattr(args, "export_gptq_data", False))
+    export_store = {} if export_enabled else None
     quantizers = {}
     for i in tqdm(range(len(layers)), desc="Layers"):
         if "cpu" in ori_dev.type:
@@ -404,6 +503,11 @@ def llama_sequential(args, model, dataloader, dev):
                 gptq[name].quantizer.configure(
                     args.wbits, perchannel=True, sym=args.sym, mse=False
                 )
+                gptq[name].set_export(
+                    enabled=export_enabled,
+                    export_dir=getattr(args, "gptq_export_dir", "gptq_export"),
+                    export_store=export_store,
+                )
 
             def add_batch(name):
                 def tmp(_, inp, out):
@@ -426,6 +530,7 @@ def llama_sequential(args, model, dataloader, dev):
             for name in subset:
                 print(f"Layer-{i}: `{name}` ...")
                 gptq[name].fasterquant(
+                    name=f"model.layers.{i}.{name}",
                     percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
                 )
                 quantizers[f'model.layers.{i}.{name}'] = gptq[name].quantizer
@@ -448,6 +553,15 @@ def llama_sequential(args, model, dataloader, dev):
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
+
+    if export_enabled and export_store is not None:
+        model_name = str(getattr(args, "model", "model")).split('/')[-1].split('\\')[-1]
+        save_gptq_export_bundle(
+            export_store=export_store,
+            export_dir=getattr(args, "gptq_export_dir", "gptq_export"),
+            model_id=model_name,
+            export_file=getattr(args, "gptq_export_file", "gptq_export.pt"),
+        )
 
     model.config.use_cache = use_cache
     
@@ -520,6 +634,18 @@ def gptq_param_parser():
         '--online-had', action='store_true',
         help='enable online hadamard rotation.'
     )
+    parser.add_argument(
+        '--export-gptq-data', action='store_true',
+        help='Export raw GPTQ tensors (scale/zero/q_int) to a single .pt bundle.'
+    )
+    parser.add_argument(
+        '--gptq-export-dir', type=str, default='gptq_export',
+        help='Output directory for exported GPTQ bundle file.'
+    )
+    parser.add_argument(
+        '--gptq-export-file', type=str, default='gptq_export.pt',
+        help='Bundle filename for exported GPTQ data.'
+    )
 
     return parser
 
@@ -528,6 +654,8 @@ if __name__ == '__main__':
     from transformers import AutoModelForCausalLM
     parser = gptq_param_parser()
     args = parser.parse_args()
+    if args.export_gptq_data and args.groupsize <= 0:
+        raise ValueError("`--export-gptq-data` requires `--groupsize > 0` (e.g. 128).")
     transformers.set_seed(args.seed)
 
     model_id = args.model

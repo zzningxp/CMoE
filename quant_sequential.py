@@ -6,6 +6,7 @@ import copy
 import time
 from tqdm import tqdm
 from reconstruct_utils import *
+from gptq_utils import save_gptq_export_bundle
 from datautils import *
 from eval_reconstruct import load_model, ppl_eval
 
@@ -342,17 +343,25 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
     gptq_losses_all = {}
     weight_sizes = {}
     op_bits = [3, 4, 5, 6]
+    # op_bits = [4]
     ops = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'down_proj', 'gate_proj']
-    loss_file = f"loss_{model.model_id}.json"
+    model_id = getattr(model, 'model_id', None)
+    if not model_id:
+        model_id = getattr(model.config, '_name_or_path', None) or getattr(model.config, 'name_or_path', None) or args.model
+    model_id = str(model_id).split('/')[-1].split('\\')[-1]
+    export_enabled = bool(getattr(args, "export_gptq_data", False))
+    if export_enabled:
+        args._gptq_export_store = {}
+    loss_file = f"loss_{model_id}.json"
     _loss_all = {}
     try:
         with open(loss_file, 'r') as f:
             _loss_all = json.load(f)
             gptq_losses_all = _loss_all['gptq_losses_all']
             weight_sizes = _loss_all['weight_sizes']
-        print(f"Loaded quantization data from files for model: {model.model_id}")
+        print(f"Loaded quantization data from files for model: {model_id}")
     except:
-        print(f"Can NOT Loaded quantization data, run pre-quantization profiling for model: {model.model_id}")
+        print(f"Can NOT Loaded quantization data, run pre-quantization profiling for model: {model_id}")
         for layer_idx, layer in tqdm(enumerate(layers), desc = 'Pre Quant layers...'):
             out, quanted_sizes, gptq_losses = sequential_layer(model,
                 True, # pre_quant_flag, pre-quant phase
@@ -384,6 +393,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
 
     profile_base_bit = 4
     profile_low_bit = 2
+    # profile_low_bit = 4
     dyn_qschemes = {layer_idx: {op_name: [profile_base_bit] for op_name in ops} for layer_idx in range(len(layers))}
     print(args.profile_only_quant_layers, args.profile_only_quant_op)
     if args.profile_only_quant_layers == None and args.profile_only_quant_op == None:
@@ -438,9 +448,18 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
         all_quanted_size += model.lm_head.weight.numel() * 16
     print(f"Total quantized size of all layers (+vol emb): {all_quanted_size} b, in GB: {all_quanted_size / 8 / 1024 / 1024 / 1024:.4f}")
 
+    if export_enabled:
+        save_gptq_export_bundle(
+            export_store=getattr(args, "_gptq_export_store", {}),
+            export_dir=getattr(args, "gptq_export_dir", "gptq_export"),
+            model_id=model_id,
+            export_file=getattr(args, "gptq_export_file", "gptq_export.pt"),
+        )
+
     # print('Training_free_ppl:')
     pre_ppl = []
-    datasets = ['wikitext2', 'c4-new']
+    # datasets = ['wikitext2', 'c4-new']
+    datasets = [args.dataset]
     for dataset in datasets:
         dataloader, testloader = get_loaders(
             dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen, bsz = args.carve_bsz

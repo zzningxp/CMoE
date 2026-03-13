@@ -103,6 +103,15 @@ if __name__ == '__main__':
     parser.add_argument(        '--profile-only-quant-op', type=str, default=None,
         help='Whether to profile only quantized ops.'
     )
+    parser.add_argument(        '--export-gptq-data', action='store_true',
+        help='Export raw GPTQ tensors (scale/zero/q_int) into a single .pt bundle.'
+    )
+    parser.add_argument(        '--gptq-export-dir', type=str, default='gptq_export',
+        help='Directory for exported GPTQ bundle file.'
+    )
+    parser.add_argument(        '--gptq-export-file', type=str, default='gptq_export.pt',
+        help='Filename for exported GPTQ bundle.'
+    )
 
     args = parser.parse_args()
     

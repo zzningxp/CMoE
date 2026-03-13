@@ -497,6 +497,13 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
     act_order = True
     static_groups = False
     sym = False
+    export_gptq_data = bool(getattr(args, "export_gptq_data", False))
+    export_dir = getattr(args, "gptq_export_dir", "gptq_export")
+    export_store = getattr(args, "_gptq_export_store", None)
+    if export_gptq_data and act_order and not static_groups:
+        # For export path, keep group mapping stable when act-order is enabled.
+        static_groups = True
+
     ffn_filters = ['up_proj', 'gate_proj', 'down_proj']
     attn_filters = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'kv_a_proj_with_mqa', 'kv_b_proj']
     if quant_attn:
@@ -548,6 +555,7 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                 split_name = name.split('.')[-1]
                 gptq[name] = GPTQ(qmodule[name])
                 gptq[name].quantizer = Quantizer()
+                gptq[name].set_export(enabled=export_gptq_data, export_dir=export_dir, export_store=export_store)
 
                 if split_name in attn_filters:
                     bit = qscheme_attn[split_name]
