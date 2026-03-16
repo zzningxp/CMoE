@@ -171,6 +171,7 @@ class GPTQ:
         # inp = inp.float()
         inp = math.sqrt(2 / self.nsamples) * inp.float()
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
+        inp = inp.to(self.dev)
         self.H += inp.matmul(inp.t()) # [K, K]
         # print(self.layer, inp.shape, self.nsamples, self.H)
 

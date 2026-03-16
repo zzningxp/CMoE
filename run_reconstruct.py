@@ -97,11 +97,14 @@ if __name__ == '__main__':
         type=str, default="quant_outlier",
         help='Rank mode for MoE reconstruction. activation|quant_outlier|random|neuron_index'
     )
-    parser.add_argument(        '--profile-only-quant-layers', type=int, default=None,
+    parser.add_argument(        '--profile-only-quant-layers', type=str, default=None,
         help='Whether to profile only quantized layers.'
     )
     parser.add_argument(        '--profile-only-quant-op', type=str, default=None,
         help='Whether to profile only quantized ops.'
+    )
+    parser.add_argument(        '--fix-lm-head-bit', type=int, default=None,
+        help='Fix lm_head bit. default: None, means 8 bit. -1 means search with GPTQ loss. 2/3/4/5/6 means fix to this bit.'
     )
 
     args = parser.parse_args()

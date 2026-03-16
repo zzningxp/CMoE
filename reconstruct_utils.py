@@ -344,11 +344,15 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
 
     ffn_filters = ['up_proj', 'gate_proj', 'down_proj']
     attn_filters = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'kv_a_proj_with_mqa', 'kv_b_proj']
+    lm_head_filter = 'lm_head'
 
     loss = {}
     
     for ff in filters:
-        qmodule_all = find_layers(layer, filters=[ff])
+        if ff == lm_head_filter:
+            qmodule_all = {lm_head_filter: layer}
+        else:
+            qmodule_all = find_layers(layer, filters=[ff])
         qbatch = 64
 
         for qmi in range(0, len(qmodule_all.keys()), qbatch):
@@ -388,6 +392,9 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
                 elif split_name in ffn_filters:
                     ffn_sample = hidden_states[isample].unsqueeze(0)
                     layer.mlp(ffn_sample)
+                elif split_name == lm_head_filter:
+                    sample = hidden_states[isample].unsqueeze(0)
+                    layer(sample)
                 else:
                     assert False, f"Not quantize {name}"
 
@@ -440,6 +447,9 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
             all_rates.append(return_loss)
         # rates = up_proj_loss / up_proj_loss.mean() + gate_proj_loss / gate_proj_loss.mean()
     # print(f"Layer {layer_idx}, neural loss rates: ", all_rates)
+    elif filters[0] in lm_head_filter:
+        # print(f"Layer {layer_idx}, lm_head loss: ", loss[lm_head_filter])
+        all_rates.append(torch.sum(loss[lm_head_filter], dim=1))
     else:
         assert False, f"Unsupported filter for quant outlier analysis: {filters}"
 
@@ -499,10 +509,14 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
     sym = False
     ffn_filters = ['up_proj', 'gate_proj', 'down_proj']
     attn_filters = ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'kv_a_proj_with_mqa', 'kv_b_proj']
+    lm_head_filter = 'lm_head'
     if quant_attn:
         filters = attn_filters + ffn_filters
     else:
         filters = ffn_filters
+    
+    if layer_idx == -1:
+        filters = [lm_head_filter]
 
     qscheme_str = args.quant_scheme
     qscheme_attn = [8]
@@ -533,15 +547,17 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
     quanted_size = 0
 
     for ff in filters:
-        qmodule_all = find_layers(layer, filters=[ff])
+        if ff == lm_head_filter:
+            qmodule_all = {lm_head_filter: layer}
+        else:
+            qmodule_all = find_layers(layer, filters=[ff])
+        # print("Quant modules", ff, qmodule_all.keys())
         qbatch = 64
 
         for qmi in range(0, len(qmodule_all.keys()), qbatch):
             tick0 = time.time()   
 
             qmodule = {k: qmodule_all[k] for k in list(qmodule_all.keys())[qmi: qmi + qbatch]}
-            # print("Quant modules", ff, qmodule.keys())
-            # print("Quant modules", ff, qmi)
             if len(qmodule.keys()) == 0:
                 continue
             for name in qmodule.keys():
@@ -565,6 +581,14 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                         eid = expert_id % slice_expert_num
                         gptq[name].quantizer.configure(bit[eid], perchannel=True, sym=sym, mse=False)
                         quanted_size += qmodule[name].weight.numel() * (bit[eid] + 32 / groupsize)
+                elif split_name == lm_head_filter and layer_idx == -1:
+                    if 'lm_head' in dyn_qscheme:
+                        bit = dyn_qscheme['lm_head'][0]
+                    else:
+                        bit = 4
+                    gptq[name].quantizer.configure(bit, perchannel=True, sym=sym, mse=False)
+                    quanted_size += qmodule[name].weight.numel() * (bit + 32 / groupsize)
+                    print(f"Quantize lm_head, bit: {bit} {qmodule[name].weight.numel(), quanted_size}")
                 else:
                     assert False, f"Some modules are not quantize {name}, check code!"
 
@@ -593,6 +617,9 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                 elif split_name in ffn_filters:
                     ffn_sample = ffn_hidden_states[isample].unsqueeze(0)
                     layer.mlp(ffn_sample)
+                elif split_name == lm_head_filter:
+                    sample = attn_hidden_states[isample].unsqueeze(0)
+                    layer(sample)
                 else:
                     assert False, f"Not quantize {name}"
 
