@@ -578,7 +578,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
     dyn_qschemes['lm_head'] = {'lm_head': [profile_base_bit]}
     
     quant_lm_head = getattr(args, 'quant_lm_head', True)
-    fix_lm_head_bit = getattr(args, 'fix_lm_head_bit', None)
+    fix_lm_head_bit = getattr(args, 'fix_lm_head_bit', 8)
     
     print(args.profile_only_quant_layers, args.profile_only_quant_op)
     if args.profile_only_quant_layers == None and args.profile_only_quant_op == None:
