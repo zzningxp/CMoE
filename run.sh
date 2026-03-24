@@ -1,14 +1,35 @@
-#!/bin/sh
+#!/bin/bash
+#SBATCH --partition=3090
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=24:00:00
+#SBATCH --output=gguf_%j.out
+#SBATCH --error=gguf_%j.err
+#SBATCH -w gn[8]
 
-# MODEL_PATH=""
-# python run_cmoe.py $MODEL_PATH wikitext2 --new-eval --nshared 2 --nactivated 2 --nexperts 16 --nsamples 64 --extra-lr 0.001 --bias-speed 0.001 --sft-bsz 1 --carve-bsz 1 --epoch 0
-#       https://huggingface.co/allenai/OLMoE-1B-7B-0924
+# 设置 CUDA 环境（即使 perplexity 可能只用 CPU，保留以防需要 GPU 加载模型）
+export CUDA_HOME=/gf3/softwares/cuda-12.8
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
 
-export CUDA_VISIBLE_DEVICES=0,1
-export HF_DATASETS_OFFLINE=1 
 
-python run_cmoe.py ~/models/Llama-2-7b-hf/ wikitext2 --new-eval --nshared 0 --nactivated 4  --nexperts 4  --nsamples 64 --quant-scheme a4s0m4422
-python run_cmoe.py ~/models/Llama-2-7b-hf/ wikitext2 --new-eval --nshared 0 --nactivated 8  --nexperts 8  --nsamples 64 --quant-scheme a3s0m33333332
+# python run_reconstruct.py /gf3/home/mqt/Eagle/models/Qwen3-8B wikitext2 \
+#   --mixqdense \
+#   --nsamples 64 \
+#   --vram-quota 4 \
+#   --export-gptq-data \
+#   --gptq-export-dir gptq_export_Q4
 
-python run_cmoe.py ~/models/DeepSeek-V2-Lite/ wikitext2 --new-eval --nshared 0 --nactivated 32 --nexperts 256 --nsamples 64 --quant-scheme a8s4m2222
-python run_cmoe.py ~/models/DeepSeek-V2-Lite/ wikitext2 --new-eval --nshared 0 --nactivated 16 --nexperts 128 --nsamples 64 --quant-scheme a8s4m42
+# python run_reconstruct.py /gf3/home/mqt/Eagle/models/Llama3.1-8B wikitext2 \
+#   --mixqdense \
+#   --nsamples 64 \
+#   --vram-quota 999 \
+#   --profile-only-quant-layers -1 \
+#   --export-gptq-data \
+#   --gptq-export-dir gptq_export_4
+
+# python convert_hf_to_gguf.py /gf3/home/mqt/Eagle/Eagle3-llama/llama.cpp/DartMQ/model/carved_llama_e1a1_None --outfile /gf3/home/mqt/Eagle/Eagle3-llama/llama.cpp/DartMQ/model/carved_llama_e1a1_None/llama3_8B_gptq.gguf
+
+# /gf3/home/mqt/Eagle/Eagle3-llama/llama.cpp/build/bin/llama-quantize /gf3/home/mqt/Eagle/Eagle3-llama/llama.cpp/DartMQ/model/carved_llama_e1a1_None/llama3_8B_gptq.gguf /gf3/home/mqt/Eagle/Eagle3-llama/llama.cpp/DartMQ/model/carved_llama_e1a1_None/llama3_8B_gptq_q4_1.gguf Q4_1
