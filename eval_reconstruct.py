@@ -399,7 +399,7 @@ if __name__ == '__main__':
             trust_remote_code=True
         )
 
-        task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande"]
-        #, "hellaswag"]
-
+        task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande", "sciq", "mnli", "hellaswag", "gsm8k", "mmlu", "triviaqa"]
+        # task_list = ["arc_challenge", "arc_easy", "boolq", "winogrande", "piqa", "sciq", "hellaswag", "mmlu", "gsm8k", "triviaqa"]
+        # task_list = ["mnli"]
         eval_zero_shot(model, task_list)

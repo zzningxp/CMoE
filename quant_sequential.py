@@ -571,7 +571,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
     print(f"Weight sizes for all layers: ", weight_sizes)
     print(f"Weight sizes for lm_head: ", weight_size_lm_head)
 
-    profile_base_bit = 4
+    profile_base_bit = 8
     profile_low_bit = 2
     # profile_low_bit = 4
     dyn_qschemes = {layer_idx: {op_name: [profile_base_bit] for op_name in ops} for layer_idx in range(len(layers))}
@@ -579,7 +579,8 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
     
     quant_lm_head = getattr(args, 'quant_lm_head', True)
     fix_lm_head_bit = getattr(args, 'fix_lm_head_bit', 8)
-    
+    # dyn_qschemes['lm_head'] = {'lm_head': [fix_lm_head_bit]}
+
     print(args.profile_only_quant_layers, args.profile_only_quant_op)
     if args.profile_only_quant_layers == None and args.profile_only_quant_op == None:
         sensitivity = {
@@ -592,7 +593,15 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
             'gate_proj': 2.0,
             'lm_head': 100.0,
             }
-        
+        sensitivity = {
+            'q_proj': 0.113069338,
+            'k_proj': 0.091652651,
+            'v_proj': 0.08202362,
+            'o_proj': 0.089444818,
+            'up_proj': 0.335445031,
+            'down_proj': 0.625093361,
+            'gate_proj': 0.320789516
+        }
         if fix_lm_head_bit is not None and fix_lm_head_bit != -1:
             gptq_loss_lm_head_fixed = {fix_lm_head_bit: {'lm_head': 0}}
         else:
@@ -611,7 +620,10 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
         elif args.profile_only_quant_layers != -1 and args.profile_only_quant_layers != '-1':
             profile_only_quant_layers = int(args.profile_only_quant_layers)
             dyn_qschemes[profile_only_quant_layers] = {op_name: [profile_low_bit] for op_name in ops}
-        ## profile_only_quant_layers == -1, profile all layers
+        elif args.profile_only_quant_layers == -1 or args.profile_only_quant_layers == '-1':
+            pass
+            ## profile_only_quant_layers == -1, profile all layers with high bit
+            ## do nothing
     elif args.profile_only_quant_op != None:
         for layer_idx in range(len(layers)):
             dyn_qschemes[layer_idx][args.profile_only_quant_op] = [profile_low_bit]
@@ -680,8 +692,8 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
 
     # print('Training_free_ppl:')
     pre_ppl = []
-    # datasets = ['wikitext2', 'c4-new']
-    datasets = [args.dataset]
+    datasets = ['wikitext2', 'c4-new']
+    # datasets = [args.dataset]
     for dataset in datasets:
         dataloader, testloader = get_loaders(
             dataset, seed=args.seed, tokenizer=tokenizer, seqlen=model.seqlen, bsz = args.carve_bsz

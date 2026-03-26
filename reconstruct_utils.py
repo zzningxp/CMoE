@@ -407,7 +407,7 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
             avg_losses = []
             max_losses = []
             for name in qmodule.keys():
-                loss[name] = gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups, update=False)
+                loss[name], _ = gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups, update=False)
                 avg_losses.append(loss[name].sum(dim=1).mean().detach().cpu().numpy().item())
                 max_losses.append(loss[name].sum(dim=1).max().detach().cpu().numpy().item())
                 gptq[name].free()
@@ -642,7 +642,7 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
             avg_losses = []
             max_losses = []
             for name in qmodule.keys():
-                loss[name] = gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups)
+                loss[name], _ = gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups)
                 avg_losses.append(loss[name].sum(dim=1).mean().detach().cpu().numpy().item())
                 max_losses.append(loss[name].sum(dim=1).max().detach().cpu().numpy().item())
                 gptq[name].free()

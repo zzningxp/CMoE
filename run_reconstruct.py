@@ -181,7 +181,9 @@ if __name__ == '__main__':
         print("SFT_ppl: ", ppl)
 
     if args.eval_zero:
-        task_list = ["arc_challenge", "arc_easy", "boolq", "winogrande", "piqa"]
+        # task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande", "sciq", "mnli", "hellaswag", "gsm8k", "mmlu", "triviaqa"]
+        # task_list = ["mnli", "gsm8k", "mmlu", "triviaqa"]
+        task_list = ["mnli"]
         eval_zero_shot(model, task_list)
     
     rt = time.time() - tick1

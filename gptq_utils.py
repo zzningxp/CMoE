@@ -377,7 +377,7 @@ class GPTQ:
         if DEBUG:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
         
-        return Losses
+        return Losses, Hinv
 
     def free(self):
         if DEBUG:
