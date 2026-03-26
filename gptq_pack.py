@@ -3,7 +3,6 @@ from typing import Dict, Tuple
 import numpy as np
 import torch
 
-
 QK_D = 128
 BLOCK_BYTES_Q3_D = 52   # [d:fp16(2)][m:fp16(2)][ql:32][qh:16]
 BLOCK_BYTES_Q4_D = 68   # [d:fp16(2)][m:fp16(2)][qs:64]

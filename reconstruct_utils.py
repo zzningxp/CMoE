@@ -347,6 +347,7 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
     lm_head_filter = 'lm_head'
 
     loss = {}
+    diag_hinv = {}
     
     for ff in filters:
         if ff == lm_head_filter:
@@ -407,15 +408,21 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
             avg_losses = []
             max_losses = []
             for name in qmodule.keys():
-                loss[name], _ = gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups, update=False)
+                loss[name], hinv = gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups, update=False)
                 avg_losses.append(loss[name].sum(dim=1).mean().detach().cpu().numpy().item())
                 max_losses.append(loss[name].sum(dim=1).max().detach().cpu().numpy().item())
+                # print(f"{name}.shape ", loss[name].shape, hinv[name].shape, torch.diag(hinv[name]).shape)
+                diag_hinv = torch.diag(hinv)
+                avg_hinv = diag_hinv.mean().detach().cpu().numpy().item()
+                max_hinv = diag_hinv.max().detach().cpu().numpy().item()
+                min_hinv = diag_hinv.min().detach().cpu().numpy().item()
                 gptq[name].free()
                 del gptq[name]
             
             tick1 = time.time()
             # print(f"Simulate quant to find outliers, layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {wbits} time: {tick1 - tick0} avg_loss: {avg_losses} max_loss: {max_losses}")
             print(f"Simulate quant to find outliers, layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {wbits} time: {tick1 - tick0}")
+            # print(f"avg_loss: {avg_losses} max_loss: {max_losses} avg_hinv: {avg_hinv} max_hinv: {max_hinv} min_hinv: {min_hinv}")
 
         del qmodule_all
     
@@ -425,7 +432,7 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
         assert n_experts == 1, "dense model n_experts == 1"
     
     if filters[0] in attn_filters:
-        all_rates.append(torch.sum(loss[name], dim=1))
+        all_rates.append(torch.sum(loss[name], dim=0))
     elif filters[0] in ffn_filters:
         for expert_idx in range(n_experts):
             if n_experts == 1:
@@ -493,6 +500,7 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
         plt.savefig(save_path)
         plt.close()
     
+    # return [rate * max_hinv for rate in all_rates]
     return all_rates
 
 @torch.no_grad()
@@ -596,7 +604,8 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                     if 'lm_head' in dyn_qscheme:
                         bit = dyn_qscheme['lm_head'][0]
                     else:
-                        bit = 4
+                        print(dyn_qscheme)
+                        assert False, f"dyn_qscheme is set wrongfor lm_head, check code!"
                     gptq[name].quantizer.configure(bit, perchannel=True, sym=sym, mse=False)
                     quanted_size += qmodule[name].weight.numel() * (bit + 32 / groupsize)
                     print(f"Quantize lm_head, bit: {bit} {qmodule[name].weight.numel(), quanted_size}")
@@ -639,17 +648,19 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
 
             for handle in handles:
                 handle.remove()
-            avg_losses = []
+            sum_losses = []
             max_losses = []
+            avg_losses = []
             for name in qmodule.keys():
                 loss[name], _ = gptq[name].fasterquant(name=f"layer_idx.{layer_idx}."+name, groupsize=groupsize, actorder=act_order, static_groups=static_groups)
-                avg_losses.append(loss[name].sum(dim=1).mean().detach().cpu().numpy().item())
-                max_losses.append(loss[name].sum(dim=1).max().detach().cpu().numpy().item())
+                sum_losses.append(loss[name].sum(dim=0).sum().detach().cpu().numpy().item())
+                max_losses.append(loss[name].max().detach().cpu().numpy().item())
+                avg_losses.append(loss[name].mean().detach().cpu().numpy().item())
                 gptq[name].free()
                 del gptq[name]
             
             tick1 = time.time()
-            print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0} loss: {avg_losses}")
+            print(f"Quantize layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {bit} time: {tick1 - tick0} sum_loss: {sum_losses} max_loss: {max_losses} avg_loss: {avg_losses}")
 
         del qmodule_all
 

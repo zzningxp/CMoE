@@ -90,9 +90,6 @@ if __name__ == '__main__':
     parser.add_argument(        '--quant-scheme', type=str, default=None,
         help='Quantization scheme like a8s4m3221.'
     )
-    parser.add_argument(        '--dyn-scheme', type=str, default=None,
-        help='Quantization scheme like b3l5h50.'
-    )
     parser.add_argument(        '--rank-mode', 
         type=str, default="quant_outlier",
         help='Rank mode for MoE reconstruction. activation|quant_outlier|random|neuron_index'
@@ -102,6 +99,12 @@ if __name__ == '__main__':
     )
     parser.add_argument(        '--profile-only-quant-op', type=str, default=None,
         help='Whether to profile only quantized ops.'
+    )
+    parser.add_argument(        '--recompute-pre-quant', action='store_true',
+        help='Whether to recompute pre-quantization profiling.'
+    )
+    parser.add_argument(        '--not-quant-lm-head', action='store_true',
+        help='Whether to not quantize lm_head.'
     )
     parser.add_argument(        '--export-gptq-data', action='store_true',
         help='Export raw GPTQ tensors (scale/zero/q_int) into a single .pt bundle.'
@@ -116,7 +119,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     print("-" * 50)
-    print("model/quant-scheme/rank-mode/dyn-scheme: (ppl)", args.model, args.quant_scheme, args.rank_mode, args.dyn_scheme)
+    print("model/quant-scheme/rank-mode: (ppl)", args.model, args.quant_scheme, args.rank_mode)
     model, tokenizer = load_model(args.model)
 
     dataloader, testloader = get_loaders(
