@@ -500,8 +500,7 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
         plt.savefig(save_path)
         plt.close()
     
-    # return [rate * max_hinv for rate in all_rates]
-    return all_rates
+    return [rate * max_hinv for rate in all_rates]
 
 @torch.no_grad()
 def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num, 

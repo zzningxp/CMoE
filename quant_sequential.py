@@ -216,13 +216,13 @@ def get_ffn_pre_quant_loss(model, layer, layer_idx, d_wbit, layer_inps, mlp_inps
 
     losses = {}
     if layer_idx == -1 and 'lm_head' in rates:
-        losses['lm_head'] = rates['lm_head'][0].mean().detach().cpu().numpy().item()
-        # losses['lm_head'] = rates['lm_head'][0].sum().detach().cpu().numpy().item()
+        # losses['lm_head'] = rates['lm_head'][0].mean().detach().cpu().numpy().item()
+        losses['lm_head'] = rates['lm_head'][0].sum().detach().cpu().numpy().item()
     else:
         for i in ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'gate_proj', 'down_proj']:
-            losses[i] = rates[i][0].mean().detach().cpu().numpy().item()
+            # losses[i] = rates[i][0].mean().detach().cpu().numpy().item()
             # print(i, rates[i][0], rates[i][0].shape)
-            # losses[i] = rates[i][0].sum().detach().cpu().numpy().item()
+            losses[i] = rates[i][0].sum().detach().cpu().numpy().item()
 
     print(f"Layer {layer_idx}, d_wbit: {d_wbit}: {losses}")
 
@@ -579,16 +579,16 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
 
     print(args.profile_only_quant_layers, args.profile_only_quant_op)
     if args.profile_only_quant_layers == None and args.profile_only_quant_op == None:
-        sensitivity = {
-            'q_proj': 0.4,
-            'k_proj': 0.4,
-            'v_proj': 1.4,
-            'o_proj': 0.8,
-            'up_proj': 2.0,
-            'down_proj': 4.0,
-            'gate_proj': 2.0,
-            'lm_head': 100.0,
-            }
+        # sensitivity = {
+        #     'q_proj': 0.4,
+        #     'k_proj': 0.4,
+        #     'v_proj': 1.4,
+        #     'o_proj': 0.8,
+        #     'up_proj': 2.0,
+        #     'down_proj': 4.0,
+        #     'gate_proj': 2.0,
+        #     'lm_head': 100.0,
+        #     }
         # sensitivity = {
         #     'q_proj': 0.113069338,
         #     'k_proj': 0.091652651,
@@ -598,7 +598,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
         #     'down_proj': 0.625093361,
         #     'gate_proj': 0.320789516
         # }
-        # sensitivity = {}
+        sensitivity = {}
         ops_ = ops + ['lm_head'] if quant_lm_head else ops
         print(f"ops_: ", quant_lm_head, ops_)
         
@@ -673,8 +673,10 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
         print(f"lm_head quantized, size: {quanted_size_lm_head} b, in GB: {quanted_size_lm_head / 8 / 1024 / 1024 / 1024:.4f}")
         print(f"Total quantized size of all quanted layers: {all_quanted_size} b, in GB: {all_quanted_size / 8 / 1024 / 1024 / 1024:.4f}")
     elif not quant_lm_head and hasattr(model, 'lm_head') and hasattr(model.lm_head, 'weight'):
-        all_quanted_size = layers_quanted_size + model.lm_head.weight.numel() * 16
+        size_lm_head = model.lm_head.weight.numel() * 16
+        all_quanted_size = layers_quanted_size + size_lm_head
         print(f"backbone quantized size: {layers_quanted_size} b, in GB: {layers_quanted_size / 8 / 1024 / 1024 / 1024:.4f}")
+        print(f"lm_head size: {size_lm_head} b, in GB: {size_lm_head / 8 / 1024 / 1024 / 1024:.4f}")
         print(f"Total quantized size of all layers (+lm_head FP16): {all_quanted_size} b, in GB: {all_quanted_size / 8 / 1024 / 1024 / 1024:.4f}")
 
     if export_enabled:
