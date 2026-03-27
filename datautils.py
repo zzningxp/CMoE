@@ -107,7 +107,7 @@ def get_c4(nsamples, seed, seqlen, tokenizer, bsz = 8):
     import random
     random.seed(0)
     valenc = []
-    for _ in range(256):
+    for _ in range(128):
         while True:
             i = random.randint(0, len(valdata) - 1)
             tmp = tokenizer(valdata[i]['text'], return_tensors='pt')
