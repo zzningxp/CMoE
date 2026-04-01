@@ -14,7 +14,6 @@ import time
 import gc
 import scipy.stats as stats
 
-from reconstruct_moe_modeling import *
 from gptq_utils import GPTQ, Quantizer, find_layers
 
 
@@ -500,7 +499,7 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
         plt.savefig(save_path)
         plt.close()
     
-    return [rate * max_hinv for rate in all_rates]
+    return [rate / max_hinv for rate in all_rates]
 
 @torch.no_grad()
 def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num, 
@@ -534,31 +533,6 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
     else:
         filters = ffn_filters
 
-    qscheme_str = args.quant_scheme
-    qscheme_attn = [8]
-    qscheme_share = [4]
-    qscheme_expert = {'up_proj':[2, 2, 2, 2, 2, 2, 2, 2], 
-                      'gate_proj':[2, 2, 2, 2, 2, 2, 2, 2], 
-                      'down_proj':[2, 2, 2, 2, 2, 2, 2, 2]}
-    if qscheme_str is not None:
-        try:
-            # sample: "a8s4m3221", "a8s4m33222222"
-            match = re.search(r'a(\d)s(\d)m(\d+)', qscheme_str)
-            aa = match.group(1)
-            ss = match.group(2)
-            ee = match.group(3)
-            qscheme_attn = [int(aa)]
-            qscheme_share = {'up_proj': [int(ss)], 'gate_proj': [int(ss)], 'down_proj': [int(ss)]}
-            qscheme_expert = {'up_proj':[int(e) for e in ee], 
-                            'gate_proj':[int(e) for e in ee], 
-                            'down_proj':[int(e) for e in ee]}
-        except:
-            print(f"Quant scheme {qscheme_str} is not valid.")
-    if dyn_qscheme is not None:
-        qscheme_share = dyn_qscheme
-        qscheme_attn = dyn_qscheme
-        qscheme_expert = {}
-
     loss = {}
     quanted_size = 0
 
@@ -584,18 +558,18 @@ def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num,
                 gptq[name].set_export(enabled=export_gptq_data, export_dir=export_dir, export_store=export_store)
 
                 if split_name in attn_filters:
-                    bit = qscheme_attn[split_name]
+                    bit = dyn_qscheme[split_name]
                     gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                     quanted_size += qmodule[name].weight.numel() * (bit[0] + 32 / groupsize) ## sym = False is 32, sym = True has no zero point is 16
                 elif split_name in ffn_filters:
                     match = re.search(r'mlp\.experts\.(\d+)', name)
                     expert_id = int(match.group(1)) if match else -1  ## shared expert id is -1
                     if expert_id == -1:
-                        bit = qscheme_share[split_name]
+                        bit = dyn_qscheme[split_name]
                         gptq[name].quantizer.configure(bit[0], perchannel=True, sym=sym, mse=False)
                         quanted_size += qmodule[name].weight.numel() * (bit[0] + 32 / groupsize)
                     else:
-                        bit = qscheme_expert[split_name]
+                        bit = dyn_qscheme[split_name]
                         eid = expert_id % slice_expert_num
                         gptq[name].quantizer.configure(bit[eid], perchannel=True, sym=sym, mse=False)
                         quanted_size += qmodule[name].weight.numel() * (bit[eid] + 32 / groupsize)

@@ -11,7 +11,6 @@ import os
 import copy
 
 from reconstruct_utils import *
-from reconstruct_moe_modeling import *
 from quant_sequential import *
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from eval_reconstruct import ppl_eval, load_model
@@ -50,9 +49,6 @@ if __name__ == '__main__':
         type=float, default=0.001, 
         help='Initial learning rate for extra scale for router.'
     )
-    parser.add_argument(        '--k-act', type=int, default=10,
-        help='TopK number for the ATopK. K_a in paper.'
-    )
     parser.add_argument(        '--bias-speed',
         type=float, default=0.001, 
         help='Bias update speed for load balancing. Gamma in paper.'
@@ -83,9 +79,6 @@ if __name__ == '__main__':
     )
     parser.add_argument(        '--vram-quota', type=float, default=12,
                         help='VRAM quota in GB for quantization.'
-    )
-    parser.add_argument(        '--prefix', type=str, default=None,
-        help='Prefix the results folder if needed.'
     )
     parser.add_argument(        '--quant-scheme', type=str, default=None,
         help='Quantization scheme like a8s4m3221.'
@@ -186,9 +179,11 @@ if __name__ == '__main__':
     if args.eval_zero:
         # task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande", "sciq", "mnli", "hellaswag", "gsm8k", "mmlu", "triviaqa"]
         # task_list = ["mnli", "gsm8k", "mmlu", "triviaqa"]
-        task_list = ["mnli"]
+        task_list = ["arc_challenge", "arc_easy"]
         eval_zero_shot(model, task_list)
     
     rt = time.time() - tick1
+    rt_ = time.time() - tick
     print(f"Runtime of training-free construction (ppl): {tick1 - tick:.2f}")
-    print(f"Runtime of fine-tuning construction (ppl): {rt:.2f}")
+    print(f"Runtime of eval zero shot time (ppl): {rt:.2f}")
+    print(f"Runtime of time (ppl): {rt_:.2f}")

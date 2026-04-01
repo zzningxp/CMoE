@@ -6,14 +6,11 @@ import torch
 import torch.nn as nn
 
 from tqdm import *
-
 import os 
-
 import copy
-
-from reconstruct_utils import *
-from reconstruct_moe_modeling import *
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+DEV = torch.device('cuda:0')
 
 @torch.no_grad()
 def ppl_eval(model, testloader, eval_set, args):
@@ -321,6 +318,8 @@ def load_model(model_path):
             model.model_id = 'llama-2-13b'
         if 'llama-3-8b' in model_path.lower():
             model.model_id = 'llama-3-8b'
+        if 'llama-3___1-8b' in model_path.lower():
+            model.model_id = 'llama-3___1-8b'
     elif 'qwen3-30b-a3b' in model_path.lower():
         model = get_qwen3_30b_a3b(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
@@ -336,6 +335,9 @@ def load_model(model_path):
             model.model_id = 'qwen3-4b'
         elif 'qwen3-8b' in model_path.lower():
             model.model_id = 'qwen3-8b'
+    elif 'qwen2.5' or 'qwen2___5' in model_path.lower():
+        model, tokenizer = get_auto(model_path)
+        model.model_id = 'qwen2.5'
     elif 'moonlight' in model_path.lower():
         model = get_moonlight(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
@@ -343,6 +345,9 @@ def load_model(model_path):
     else:
         assert False, "Model type not supported."
     model.eval()
+    if not model.model_id:
+        model.model_id = getattr(model.config, '_name_or_path', None) or getattr(model.config, 'name_or_path', None) or args.model
+    model.model_id = str(model.model_id).split('/')[-1].split('\\')[-1]
     return model, tokenizer
 
 if __name__ == '__main__':
