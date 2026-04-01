@@ -421,7 +421,7 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
             tick1 = time.time()
             # print(f"Simulate quant to find outliers, layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {wbits} time: {tick1 - tick0} avg_loss: {avg_losses} max_loss: {max_losses}")
             print(f"Simulate quant to find outliers, layer {layer_idx} {ff} {qmi}:{qmi + min(qbatch, len(qmodule.keys()))} bits: {wbits} time: {tick1 - tick0}")
-            # print(f"avg_loss: {avg_losses} max_loss: {max_losses} avg_hinv: {avg_hinv} max_hinv: {max_hinv} min_hinv: {min_hinv}")
+            print(f"avg_loss: {avg_losses} max_loss: {max_losses} avg_hinv: {avg_hinv} max_hinv: {max_hinv} min_hinv: {min_hinv}")
 
         del qmodule_all
     
@@ -499,7 +499,7 @@ def analyze_quant_outlier(layer, layer_idx, hidden_states,
         plt.savefig(save_path)
         plt.close()
     
-    return [rate / max_hinv for rate in all_rates]
+    return [rate * max_hinv for rate in all_rates]
 
 @torch.no_grad()
 def quant_layer_mix_precision(layer, layer_idx, quant_attn, slice_expert_num, 

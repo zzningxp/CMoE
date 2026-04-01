@@ -60,7 +60,7 @@ def assign_quant_scheme_from_gptq_loss(gptq_losses_all, gptq_loss_lm_head,
                 revised_loss = revised_loss * OP_SENSITIVITY_WEIGHTS.get(op_name, 1.0)
                 # revised_loss = revised_loss * get_depth_sensitivity(layer_id, len(layer_ids))
                 
-                revised_loss = revised_loss / ((bit - 2 + 0.01)  ** 2)
+                revised_loss = revised_loss / ((bit - 2 + 0.2)  ** 2)
 
                 options.append( (bit, revised_loss, mem_usage) )
             
