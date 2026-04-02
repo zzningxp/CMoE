@@ -8,3 +8,4 @@ logs/
 run.*.sh
 run.sh
 *.json
+*.csv

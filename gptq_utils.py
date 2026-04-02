@@ -168,6 +168,10 @@ class GPTQ:
         # [K, K]
         self.H = torch.zeros((self.columns, self.columns), device=self.dev)
         self.nsamples = 0
+
+        self.inp_energy = 0.0 
+        self.out_energy = 0.0
+
         self._export_gptq_data = False
         self._export_gptq_dir = "gptq_export"
         self._export_gptq_store = None
@@ -195,6 +199,9 @@ class GPTQ:
         # self.H += 2 / self.nsamples * inp.matmul(inp.t())
         self.H += inp.matmul(inp.t()) # [K, K]
         # print(self.layer, inp.shape, self.nsamples, self.H)
+
+        self.inp_energy += torch.sum(inp ** 2).item()
+        self.out_energy += torch.sum(out ** 2).item()
 
     def fasterquant(
         self, name: str, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False, update=True
@@ -377,7 +384,8 @@ class GPTQ:
         if DEBUG:
             print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
         
-        return Losses, Hinv
+        energy_gain = math.sqrt(self.out_energy / self.inp_energy)
+        return Losses, Hinv, energy_gain
 
     def free(self):
         if DEBUG:

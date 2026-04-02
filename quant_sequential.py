@@ -19,11 +19,15 @@ def get_depth_sensitivity(layer_idx, total_layers):
 
 def assign_quant_scheme_from_gptq_loss(gptq_losses_all, gptq_loss_lm_head,
                                        weight_sizes, weight_size_lm_head, 
-                                       vram_quota, FIXED_OP_ORDER, OP_SENSITIVITY_WEIGHTS, FIXED_BITS, fixed_lm_head_bit):
+                                       vram_quota, FIXED_OP_ORDER, OP_SENSITIVITY_WEIGHTS, 
+                                       all_hinvs, all_gains, 
+                                       FIXED_BITS, fixed_lm_head_bit):
     layer_ids = sorted(gptq_losses_all.keys())
     layer_ids = [int(i) for i in layer_ids]
     weight_sizes = {int(k): v for k, v in weight_sizes.items()}
     gptq_losses_all = {int(k): v for k, v in gptq_losses_all.items()}
+    all_hinvs = {int(k): v for k, v in all_hinvs.items()}
+    all_gains = {int(k): v for k, v in all_gains.items()}
     
     ops = []
     
@@ -61,6 +65,7 @@ def assign_quant_scheme_from_gptq_loss(gptq_losses_all, gptq_loss_lm_head,
                 # revised_loss = revised_loss * get_depth_sensitivity(layer_id, len(layer_ids))
                 
                 revised_loss = revised_loss / ((bit - 2 + 0.2)  ** 2)
+                revised_loss = revised_loss * all_hinvs[layer_id][op_name]
 
                 options.append( (bit, revised_loss, mem_usage) )
             
@@ -188,8 +193,8 @@ def assign_quant_scheme_from_gptq_loss(gptq_losses_all, gptq_loss_lm_head,
             print(f"{op_name}: {result[layer_id][op_name]} ({result_loss[layer_id][op_name]:.3f}) ", end="")
         print()
 
-    print(f"Best total loss: {best_loss:.6f}, Total quantized memory: {best_final_mem} b within quota {vram_quota} b")
-    print(f"Best total loss: {best_loss:.6f}, Total quantized memory: {best_final_mem / 8 / 1024 / 1024 / 1024:.4f} GB within quota {vram_quota / 8 / 1024 / 1024 / 1024:.4f} GB")
+    print(f"Best total loss: {best_loss:.6f}, Total quantized memory: {best_final_mem} B within quota {vram_quota} B")
+    print(f"Best total loss: {best_loss:.6f}, Total quantized memory: {best_final_mem / 1024 / 1024 / 1024:.4f} GB within quota {vram_quota / 1024 / 1024 / 1024:.4f} GB")
     return result, result_loss
 
 @torch.no_grad()
@@ -199,19 +204,21 @@ def get_op_pre_quant_loss(model, layer, layer_idx, d_wbit, layer_inps, mlp_inps,
         # save_path=f"plot/_{model.config.model_type}_quant_outlier_{layer_idx}.png"
         save_path = None
         rates = {}
+        all_hinv = {}
+        all_gain = {}
         if layer_idx == -1:
             if hasattr(model, 'lm_head'):
-                rates['lm_head'] = analyze_quant_outlier(layer, layer_idx, layer_inps,
+                rates['lm_head'], all_hinv['lm_head'], all_gain['lm_head'] = analyze_quant_outlier(layer, layer_idx, layer_inps,
                                                        n_experts = 1, wbits=d_wbit, if_dense=True, 
                                                        filters = ['lm_head'], save_path=save_path, args=args)
         else:
             for i in ['q_proj', 'k_proj', 'v_proj', 'o_proj']:
-                rates[i] = analyze_quant_outlier(layer, layer_idx, layer_inps, 
+                rates[i], all_hinv[i], all_gain[i] = analyze_quant_outlier(layer, layer_idx, layer_inps, 
                                                 attention_mask, position_ids, position_embeddings, 
                                                 n_experts = 1, wbits=d_wbit, if_dense=True, 
                                                 filters = [i], save_path=save_path, args=args)
             for i in ['up_proj', 'gate_proj', 'down_proj']:
-                rates[i] = analyze_quant_outlier(layer, layer_idx, mlp_inps, 
+                rates[i], all_hinv[i], all_gain[i] = analyze_quant_outlier(layer, layer_idx, mlp_inps, 
                                                 n_experts = 1, wbits=d_wbit, if_dense=True, 
                                                 filters = [i], save_path=save_path, args=args)
     else:
@@ -219,17 +226,13 @@ def get_op_pre_quant_loss(model, layer, layer_idx, d_wbit, layer_inps, mlp_inps,
 
     losses = {}
     if layer_idx == -1 and 'lm_head' in rates:
-        # losses['lm_head'] = rates['lm_head'][0].mean().detach().cpu().numpy().item()
         losses['lm_head'] = rates['lm_head'][0].sum().detach().cpu().numpy().item()
     else:
         for i in ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'up_proj', 'gate_proj', 'down_proj']:
-            # losses[i] = rates[i][0].mean().detach().cpu().numpy().item()
-            # print(i, rates[i][0], rates[i][0].shape)
             losses[i] = rates[i][0].sum().detach().cpu().numpy().item()
+    # print(f"Layer {layer_idx}, d_wbit: {d_wbit}: {losses}")
 
-    print(f"Layer {layer_idx}, d_wbit: {d_wbit}: {losses}")
-
-    return losses
+    return losses, all_hinv, all_gain
 
 @torch.no_grad()
 def sequential_layer(model, pre_quant_flag, op_bits, ops, layer, layer_idx, inp, attention_mask, position_ids, position_embeddings, 
@@ -278,9 +281,11 @@ def sequential_layer(model, pre_quant_flag, op_bits, ops, layer, layer_idx, inp,
     
     gptq_losses = {}
     quanted_sizes = {}
+    all_hinv = 0
+    all_gain = 0
     if pre_quant_flag:
         for base_bit in op_bits:
-            gptq_losses[base_bit] = get_op_pre_quant_loss(model, layer, layer_idx, base_bit, 
+            gptq_losses[base_bit], all_hinv, all_gain = get_op_pre_quant_loss(model, layer, layer_idx, base_bit, 
                                 hidden_states_inorm, hidden_states, 
                                 attention_mask, position_ids, position_embeddings, 
                                 args)
@@ -292,6 +297,8 @@ def sequential_layer(model, pre_quant_flag, op_bits, ops, layer, layer_idx, inp,
         gc.collect()
         torch.cuda.empty_cache()
         print(f"Pre-quantization GPTQ losses for layer {layer_idx}: ", gptq_losses)
+        print(f"Pre-quantization hinv for layer {layer_idx}: ", all_hinv)
+        print(f"Pre-quantization gain for layer {layer_idx}: ", all_gain)
     
     if not pre_quant_flag:
         quanted_sizes['all'] = quant_layer_mix_precision(layer, layer_idx, True, 1, 
@@ -315,7 +322,7 @@ def sequential_layer(model, pre_quant_flag, op_bits, ops, layer, layer_idx, inp,
 
     moe_out = moe_out + residual
     # print("moe_out")
-    return moe_out, quanted_sizes, gptq_losses
+    return moe_out, quanted_sizes, gptq_losses, all_hinv, all_gain
 
 
 def _module_device(module):
@@ -466,7 +473,10 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
         gptq_loss_lm_head = {}
         weight_sizes = {}
         weight_size_lm_head = {}
-        op_bits = [2, 3, 4, 5, 6]
+        all_hinvs = {}
+        all_gains = {}
+        # op_bits = [2, 3, 4, 5, 6]
+        op_bits = [3, 4, 5, 6]
         # op_bits = [4]
         model_id = getattr(model, 'model_id', None)
 
@@ -485,6 +495,8 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
                 gptq_loss_lm_head = _loss_all.get('gptq_loss_lm_head', {})
                 weight_sizes = _loss_all['weight_sizes']
                 weight_size_lm_head = _loss_all.get('weight_size_lm_head', {})
+                all_hinvs = _loss_all['all_hinvs']
+                all_gains = _loss_all['all_gains']
             print(f"Loaded quantization data from files for model: {model_id}")
         else:
             if args.recompute_pre_quant == False:
@@ -493,7 +505,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
                 print(f"#### !!!! Recompute pre-quantization profiling for model: {model_id} ####")
             run_pre_quant_profiling = True
             for layer_idx, layer in tqdm(enumerate(layers), desc = 'Pre Quant layers...'):
-                out, quanted_sizes, gptq_losses = sequential_layer(model,
+                out, quanted_sizes, gptq_losses, hinv, gain = sequential_layer(model,
                     True, # pre_quant_flag, pre-quant phase
                     op_bits, #
                     ops,
@@ -509,6 +521,8 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
 
                 weight_sizes[layer_idx] = quanted_sizes
                 gptq_losses_all[layer_idx] = gptq_losses
+                all_hinvs[layer_idx] = hinv
+                all_gains[layer_idx] = gain
                 inps = out
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -518,7 +532,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
                 lm_head_hidden_states = inps
                 lm_head_inputs = _prepare_lm_head_inputs(model, lm_head_hidden_states)
                 for base_bit in op_bits:
-                    gptq_loss_lm_head[base_bit] = get_op_pre_quant_loss(model, model.lm_head, -1, base_bit,
+                    gptq_loss_lm_head[base_bit], all_hinv, all_gain = get_op_pre_quant_loss(model, model.lm_head, -1, base_bit,
                                     lm_head_inputs, None,
                                     attention_mask, position_ids, position_embeddings,
                                     args)
@@ -528,6 +542,8 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
             _loss_all['gptq_loss_lm_head'] = gptq_loss_lm_head
             _loss_all['weight_sizes'] = weight_sizes
             _loss_all['weight_size_lm_head'] = weight_size_lm_head
+            _loss_all['all_hinvs'] = all_hinvs
+            _loss_all['all_gains'] = all_gains
             _loss_all['lm_head_input_stage'] = 'post_layers_post_norm'
             _loss_all['lm_head_profile_version'] = 2
             with open(loss_file, 'w') as f:
@@ -553,7 +569,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
             lm_head_inputs = _prepare_lm_head_inputs(model, lm_head_hidden_states)
             gptq_loss_lm_head = {}
             for base_bit in op_bits:
-                gptq_loss_lm_head[base_bit] = get_op_pre_quant_loss(model, model.lm_head, -1, base_bit,
+                gptq_loss_lm_head[base_bit], all_hinv, all_gain = get_op_pre_quant_loss(model, model.lm_head, -1, base_bit,
                                 lm_head_inputs, None,
                                 attention_mask, position_ids, position_embeddings,
                                 args)
@@ -569,6 +585,8 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
         print(f"GPTQ losses for lm_head: ", gptq_loss_lm_head)
         print(f"Weight sizes for all layers: ", weight_sizes)
         print(f"Weight sizes for lm_head: ", weight_size_lm_head)
+        print(f"All hinvs for all layers: ", all_hinvs)
+        print(f"All gains for all layers: ", all_gains)
 
         profile_base_bit = 8
         profile_low_bit = 2
@@ -580,23 +598,22 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
 
         print(args.profile_only_quant_layers, args.profile_only_quant_op)
         if args.profile_only_quant_layers == None and args.profile_only_quant_op == None:
-            # sensitivity = {
-            #     'q_proj': 0.4,
-            #     'k_proj': 0.4,
-            #     'v_proj': 1.4,
-            #     'o_proj': 0.8,
-            #     'up_proj': 2.0,
-            #     'down_proj': 4.0,
-            #     'gate_proj': 2.0,
-            #     'lm_head': 100.0,
-            #     }
-            sensitivity = {}
+            sensitivity = {
+                'q_proj': 1.0,
+                'k_proj': 1.0,
+                'v_proj': 1.0 * 2, # softmax 
+                'o_proj': 1.0,
+                'up_proj': 1.0, # * model.config.hidden_size / model.config.intermediate_size,
+                'gate_proj': 1.0, # * model.config.hidden_size / model.config.intermediate_size,
+                'down_proj': 1.0 * model.config.intermediate_size / model.config.hidden_size,
+                }
+            # sensitivity = {}
             ops_ = ops + ['lm_head'] if quant_lm_head else ops
             print(f"ops_: ", quant_lm_head, ops_)
             
             dyn_qschemes, dyn_losses = assign_quant_scheme_from_gptq_loss(
                 gptq_losses_all, gptq_loss_lm_head, weight_sizes, weight_size_lm_head, 
-                args.vram_quota, ops_, sensitivity, op_bits, fixed_lm_head_bit)
+                args.vram_quota, ops_, sensitivity, all_hinvs, all_gains, op_bits, fixed_lm_head_bit)
         elif args.profile_only_quant_layers != None:
             if args.profile_only_quant_layers == 'lm_head':
                 dyn_qschemes['lm_head'] = {'lm_head': [profile_low_bit]}
@@ -612,7 +629,9 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
         elif args.profile_only_quant_op != None:
             for layer_idx in range(len(layers)):
                 dyn_qschemes[layer_idx][args.profile_only_quant_op] = [profile_low_bit]
-        print(f"Dynamic quantization schemes for each layer and op: ", dyn_qschemes)
+        print(f"Dynamic quantization schemes for each layer and op: ")
+        for layer_idx in range(len(layers)):
+            print(f"Layer {layer_idx}: ", dyn_qschemes[layer_idx])
         inps = inps_ori
     else:
         quant_bit = int(args.quant_scheme)
@@ -627,7 +646,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
     quanted_size_lm_head = 0
 
     for layer_idx, layer in tqdm(enumerate(layers), desc = 'Actual Quant layers...'):
-        out, quanted_sizes, _ = sequential_layer(model,
+        out, quanted_sizes, _, _, _ = sequential_layer(model,
             False, # pre_quant_flag, pre-quant phase
             None,
             None,
