@@ -42,10 +42,10 @@ In terms of accuracy, it can directly achieve precision consistent with AMQ sear
 | Pre-quantization | **Proxy Quantization:** Uses HQQ to rapidly generate quantized models at different bit-widths to serve as a baseline for subsequent searches. | **Loss Table Calculation:** Utilizes Hessian matrices and activation statistics to directly compute and store an "Operator-Bit-Error" lookup table. |
 | Sensitivity Analysis | **Brute-force Probing:** Uses a "leave-one-out" method to calculate JSD distance, exhaustively searching for high-sensitivity operators to forcibly lock (Pass List). | **Topological Correction:** Incorporates "Output/Input Variance Ratio," "Dimension Convergence Ratio," and "Hessian Sensitivity" to automatically identify special operators (like `Down_proj`) without manual locking. |
 | Search Strategy | **Pareto Search:** Uses Evolutionary Algorithms (NSGA-II) + Surrogate Models to search for an optimal solution within a vast search space. | **Dynamic Programming:** Based on pre-calculated loss tables, uses a DP algorithm to directly compute the globally optimal bit allocation scheme. |
-| Operational Details | Does not support directly capping the memory upper limit via quota (requires manual comparison). Does not support quantization above 5-bit effectively due to the pass list limitations. Optimized for specific models. | Fully automated strategy acquisition based on algorithmic calculations. Supports a wider range of models and achieves theoretical minimum loss. |
+| Operational Details | Does not support directly capping the memory upper limit via quota (requires manual comparison). Does not support quantization above 5-bit effectively due to the pass list and VRAM limitations. Optimized for specific models. | Fully automated strategy acquisition based on algorithmic calculations. Supports a wider range of models and achieves theoretical minimum loss. |
 
 ### Time and Memory Consumption:
-* Model: qwen2.5-7b
+* Model: Llama2-7B
 * Operating System: Linux (Kernel 5.15.0-122-generic)
 * CPU: Intel Xeon Gold 6226R CPU @ 2.90GHz
 * GPU: NVIDIA GeForce RTX 3090 (24GB VRAM)
@@ -59,18 +59,22 @@ In terms of accuracy, it can directly achieve precision consistent with AMQ sear
 | Final Selection | 0.96s | CPU Only | 1.03s | CPU Only |
 | Total Summary | **21077.99s** | **Peak: 20.18 GB** | **1496.39s** | **Peak: 12.77 GB** |
 
+Notice: AMQ need more Peak VRAM to support quantization above 5-bit, and the Peak VRAM of DartMQ supports quantization with 3/4/5/6/8-bit. 
+
 ### Results:
 <img src="figures/mainresult.png" width="500">
 
-<img src="figures/qwen3-8b-1.png" width="500">
+<img src="figures/qwen3-8b-1.png" width="600">
 
-<img src="figures/qwen3-4b-1.png" width="500">
+<img src="figures/qwen3-4b-1.png" width="600">
 
-<img src="figures/llama2-7b-1.png" width="500">
+<img src="figures/llama2-7b-1.png" width="600">
 
-<img src="figures/llama3.1-8b-1.png" width="500">
+<img src="figures/llama3.1-8b-1.png" width="600">
 
-<img src="figures/qwen2.5-7b-1.png" width="500">
+<img src="figures/llama3-8b-1.png" width="600">
+
+<img src="figures/qwen2.5-7b-1.png" width="600">
 
 AMQ: Enabling AutoML for Mixed-precision Weight-Only Quantization of Large Language Models: http://arxiv.org/abs/2509.12019, EMNLP 2025 Oral
 
@@ -114,6 +118,8 @@ Unified overall quantization method: When using --quant-scheme 2, all operator w
 ```
 python run_reconstruct.py ~/models/$MODEL_PATH wikitext2 --mixqdense --nsamples 64 --quant-scheme 2 --not-quant-lm-head
 ```
+
+**Proble quantization: is not nessesary to directly quantize the model, it is an experimental ablation method.**
 
 Layer Probe quantization: When using --profile-only-quant-layers, it will execute extreme 2-bit quantization on the current layer while keeping other layers at 8-bit. When using --profile-only-quant-layers -1, it will execute extreme 8-bit quantization on all layers.
 Operator Probe quantization: When using --profile-only-quant-op, it will execute extreme 2-bit quantization on the specified operator across all layers while keeping other layers at 8-bit.
