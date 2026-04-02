@@ -10,7 +10,7 @@ Our core insight is transforming the precision allocation problem into a **Group
 *   **Hard Memory Constraint Satisfaction:** DartMQ prioritizes "fit-first, optimize-second." It guarantees the quantized model will strictly fit within your GPU/VRAM budget (e.g., 4GB, with command args --vram-quota 4.0 ), avoiding Out-Of-Memory (OOM) crashes.
 *   **Global Optimality & Determinism:** By using Dynamic Programming, we find the globally optimal mixed-precision configuration. Unlike genetic algorithms, our results are reproducible and deterministic.
 *   **Calibrated Sensitivity:** We correct the bias in traditional Hessian estimation (GPTQ loss) by calibrating local reconstruction errors to actual global Perplexity (PPL) impact. This ensures critical layers (like projection layers) are preserved at higher precision.
-*   **Unmatched Speed:** Reduce the mixed-precision search overhead by **3–4 orders of magnitude** compared to state-of-the-art AutoML methods (e.g., AMQ).
+*   **Unmatched Speed:** Reduce the mixed-precision search overhead compared to state-of-the-art AutoML methods (e.g., AMQ).
 *   **Export to GGUF Format:** Export the mixture precision quantized model to pt
 format, then GGUF format with llama.cpp.
 
@@ -20,7 +20,7 @@ format, then GGUF format with llama.cpp.
 Uniform quantization (e.g., all 4-bit) creates a "dead zone" of unused memory. For example, a model might fit in 3-bit (low accuracy) or not fit in 4-bit (high accuracy), leaving a gap of unused VRAM capacity.
 
 ### 2. The DartMQ Solution
-We solve this by assigning varying bit-widths (3, 4, 5, 6, 8 bits) to different operators (layers).
+We solve this by assigning varying bit-widths (3, 4, 5, 6 bits) to different operators (layers).
 
 1.  **Pre-Quantization Profiling:** We perform a one-time profiling to each operator to global perplexity impact, correcting the variance-induced bias in Hessian estimation.
 2.  **Grouped Knapsack Formulation:**
@@ -33,9 +33,46 @@ We solve this by assigning varying bit-widths (3, 4, 5, 6, 8 bits) to different 
 DartMQ performs near mixed-precision (AMQ) methods under identical memory constraints, but with significantly faster search time.
 
 ## vs AMQ 
+
+In terms of accuracy, it can directly achieve precision consistent with AMQ search results. In terms of speed, it is significantly superior to AMQ.
+
+
+| Process Stage | AMQ Core Functionality | DMQ Core Functionality |
+| :--- | :--- | :--- |
+| Pre-quantization | **Proxy Quantization:** Uses HQQ to rapidly generate quantized models at different bit-widths to serve as a baseline for subsequent searches. | **Loss Table Calculation:** Utilizes Hessian matrices and activation statistics to directly compute and store an "Operator-Bit-Error" lookup table. |
+| Sensitivity Analysis | **Brute-force Probing:** Uses a "leave-one-out" method to calculate JSD distance, exhaustively searching for high-sensitivity operators to forcibly lock (Pass List). | **Topological Correction:** Incorporates "Output/Input Variance Ratio," "Dimension Convergence Ratio," and "Hessian Sensitivity" to automatically identify special operators (like `Down_proj`) without manual locking. |
+| Search Strategy | **Pareto Search:** Uses Evolutionary Algorithms (NSGA-II) + Surrogate Models to search for an optimal solution within a vast search space. | **Dynamic Programming:** Based on pre-calculated loss tables, uses a DP algorithm to directly compute the globally optimal bit allocation scheme. |
+| Operational Details | Does not support directly capping the memory upper limit via quota (requires manual comparison). Does not support quantization above 5-bit effectively due to the pass list limitations. Optimized for specific models. | Fully automated strategy acquisition based on algorithmic calculations. Supports a wider range of models and achieves theoretical minimum loss. |
+
+### Time and Memory Consumption:
+* Model: LLaMA-2-7B
+* Operating System: Linux (Kernel 5.15.0-122-generic)
+* CPU: Intel Xeon Gold 6226R CPU @ 2.90GHz
+* GPU: NVIDIA GeForce RTX 3090 (24GB VRAM)
+* CUDA Version: 12.8
+
+| Process Stage | AMQ Time | AMQ VRAM | DMQ Time | DMQ VRAM |
+| :--- | :--- | :--- | :--- | :--- |
+| Pre-quantization | 2bit 77.81s<br>3bit 77.90s<br>4bit 80.02s<br>**Total: 235.73s** | 4.5 GB | 1495.36s | 12.77 GB |
+| Sensitivity | 325.33s | 1. Dense Logits: 8.289 GB<br>2. Proxy Model: 11.79 GB<br>Total: 20.18 GB | N/A | N/A |
+| Search | 6248.41s | 1. Dense Logits: 8.289 GB<br>2. Proxy Model: 11.79 GB<br>Total: 20.18 GB | N/A | N/A |
+| Final Selection | 0.96s | CPU Only | 1.03s | CPU Only |
+| Total Summary | **6485.1s** | **Peak: 20.18 GB** | **1496.39s** | **Peak: 12.77 GB** |
+
+### Results:
+<img src="figures/mainresult.png" width="500">
+
+<img src="figures/qwen3-8b-1.png" width="500">
+
+<img src="figures/qwen3-4b-1.png" width="500">
+
+<img src="figures/llama2-7b-1.png" width="500">
+
+<img src="figures/llama3.1-8b-1.png" width="500">
+
+<img src="figures/qwen2.5-7b-1.png" width="500">
+
 AMQ: Enabling AutoML for Mixed-precision Weight-Only Quantization of Large Language Models: http://arxiv.org/abs/2509.12019, EMNLP 2025 Oral
-
-
 
 ## Dependencies
 
@@ -54,21 +91,49 @@ pip install peft==0.14.0
 ```
 Note: please modify the version of some packages for your own environment.
 
+Supported multi GPUs serial execution.
 ## Supported Models
 
 Dense Models:
 
-Llama-2-7B / Llama-2-13B / Llama3-8B / Qwen3-8B / Qwen3-4B
+Llama-2-7B / Llama-2-13B / Llama3-8B / Llama3.1-8B / Qwen3-8B / Qwen3-4B
 
 ## Quick Start
 
+Quantize and compress the model to 3GB (when using --not-quant-lm-head, the 3GB does not include lm_head; otherwise, the 3GB includes lm_head).
+During the first quantization, a pre-quantized loss.json file needs to be generated in the current directory. For subsequent quantizations, if --recompute-pre-quant is not specified, there's no need to re-pre-quantize; simply use the existing loss.json file. When --recompute-pre-quant is specified, a new loss.json file will be pre-quantized.
 ```
 python run_reconstruct.py $MODEL_PATH wikitext2 --mixqdense --nsamples 64 --vram-quota 3 --not-quant-lm-head --recompute-pre-quant
 ```
+Model evaluation: When using --eval-zero, the quantized model will be evaluated.
+```
+task_list = ["arc_challenge", "arc_easy", "piqa", "boolq", "winogrande", "sciq", "mnli", "hellaswag", "gsm8k", "mmlu", "triviaqa"]
+```
 
-## Evaluation
+Unified overall quantization method: When using --quant-scheme 2, all operator weights will be quantized to 2-bit.
+```
+python run_reconstruct.py ~/models/$MODEL_PATH wikitext2 --mixqdense --nsamples 64 --quant-scheme 2 --not-quant-lm-head
+```
 
-bash run.sh
+Layer Probe quantization: When using --profile-only-quant-layers, it will execute extreme 2-bit quantization on the current layer while keeping other layers at 8-bit. When using --profile-only-quant-layers -1, it will execute extreme 8-bit quantization on all layers.
+Operator Probe quantization: When using --profile-only-quant-op, it will execute extreme 2-bit quantization on the specified operator across all layers while keeping other layers at 8-bit.
+These two commands are typically used separately and usually obtain results through external data statistics. 2-bit and 8-bit configurations need to be modified in the code.
+```
+python run_reconstruct.py ~/models/$MODEL_PATH wikitext2 --mixqdense --nsamples 64 --profile-only-quant-layers -1
+for i in `seq 0 35 `
+do
+python run_reconstruct.py ~/models/$MODEL_PATH wikitext2 --mixqdense --nsamples 64 --profile-only-quant-layers $i
+# sleep 60s
+done
+```
+```
+for i in `echo q_proj k_proj v_proj o_proj up_proj down_proj gate_proj `
+do
+python run_reconstruct.py ~/models/$MODEL_PATH wikitext2 --mixqdense --nsamples 64 --profile-only-quant-op $i
+done
+```
+
+Model evaluation without Quantization:
 ```
 # python
 python eval_cmoe.py $MODEL_PATH 
