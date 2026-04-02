@@ -45,7 +45,7 @@ In terms of accuracy, it can directly achieve precision consistent with AMQ sear
 | Operational Details | Does not support directly capping the memory upper limit via quota (requires manual comparison). Does not support quantization above 5-bit effectively due to the pass list limitations. Optimized for specific models. | Fully automated strategy acquisition based on algorithmic calculations. Supports a wider range of models and achieves theoretical minimum loss. |
 
 ### Time and Memory Consumption:
-* Model: LLaMA-2-7B
+* Model: qwen2.5-7b
 * Operating System: Linux (Kernel 5.15.0-122-generic)
 * CPU: Intel Xeon Gold 6226R CPU @ 2.90GHz
 * GPU: NVIDIA GeForce RTX 3090 (24GB VRAM)
@@ -55,9 +55,9 @@ In terms of accuracy, it can directly achieve precision consistent with AMQ sear
 | :--- | :--- | :--- | :--- | :--- |
 | Pre-quantization | 2bit 77.81s<br>3bit 77.90s<br>4bit 80.02s<br>**Total: 235.73s** | 4.5 GB | 1495.36s | 12.77 GB |
 | Sensitivity | 325.33s | 1. Dense Logits: 8.289 GB<br>2. Proxy Model: 11.79 GB<br>Total: 20.18 GB | N/A | N/A |
-| Search | 6248.41s | 1. Dense Logits: 8.289 GB<br>2. Proxy Model: 11.79 GB<br>Total: 20.18 GB | N/A | N/A |
+| Search | 20515.97s | 1. Dense Logits: 8.289 GB<br>2. Proxy Model: 11.79 GB<br>Total: 20.18 GB | N/A | N/A |
 | Final Selection | 0.96s | CPU Only | 1.03s | CPU Only |
-| Total Summary | **6485.1s** | **Peak: 20.18 GB** | **1496.39s** | **Peak: 12.77 GB** |
+| Total Summary | **21077.99s** | **Peak: 20.18 GB** | **1496.39s** | **Peak: 12.77 GB** |
 
 ### Results:
 <img src="figures/mainresult.png" width="500">
