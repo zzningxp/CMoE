@@ -3,7 +3,7 @@
 
 **DartMQ** is a deterministic, low-overhead framework designed for deploying Large Language Models (LLMs) on resource-constrained embedded systems and consumer-grade GPUs. Unlike traditional quantization methods, DartMQ guarantees that the model fits within a strict, user-defined memory budget while maximizing accuracy.
 
-Our core insight is transforming the precision allocation problem into a **Grouped Knapsack Problem**, solved optimally via **Dynamic Programming (DP)**. This approach eliminates the stochastic search overhead of AutoML methods, reducing search time from hours to milliseconds.
+Our core insight is transforming the precision allocation problem into a **Grouped Knapsack Problem**, solved optimally via **Dynamic Programming (DP)**. This approach eliminates the stochastic search overhead of AutoML methods, reducing search time from hours to minutes.
 
 ## Key Features
 
@@ -13,6 +13,11 @@ Our core insight is transforming the precision allocation problem into a **Group
 *   **Unmatched Speed:** Reduce the mixed-precision search overhead compared to state-of-the-art AutoML methods (e.g., AMQ).
 *   **Export to GGUF Format:** Export the mixture precision quantized model to pt
 format, then GGUF format with llama.cpp.
+
+## Algorithm Insights
+*  **Staircase Effect and Error Compensation** We observe a pronounced staircase effect in local quantization error: increasing the bit-width by a single unit often reduces the local reconstruction error by an order of magnitude. However, this drastic local error reduction only brings marginal improvement in global PPL, as quantization errors in LLMs exhibit complementary robustness across layers, where errors in one layer can be partially absorbed by subsequent layers. This exposes the weakness of greedy strategies, which tend to over-invest memory in layers with large local error drops but negligible global utility. Our grouped knapsack formulation avoids this trap by evaluating the global sensitivity-weighted gain per unit memory for all discrete transitions simultaneously.
+*  **Smooth Logarithmic Pareto Frontier** Extensive empirical analysis across mainstream LLM architectures reveals that the memory-accuracy Pareto frontier forms a smooth, continuous, logarithmic-like curve. This smoothness arises from three intrinsic properties: the additivity of quantization loss across layers, the monotonicity between memory savings and bit-width reduction, and the uniform sensitivity distribution of operators in dense Transformer models. This implies that exhaustive heuristic searches of the entire frontier are computationally wasteful; for fixed memory constraints, we only need to pinpoint the single optimal configuration that satisfies the hard budget, motivating our direct solving approach.
+*  **Sensitivity Discrepancy Between Local Loss and Global PPL** A fundamental assumption in existing quantization frameworks is that local reconstruction loss serves as a reliable proxy for global performance degradation. However, we reveal a critical input variance bias in this assumption: for projection layers immediately following activation functions (e.g., \texttt{proj\_o} and \texttt{proj\_down}), the input distribution has significantly lower variance due to the squashing effects of activation functions, leading to underestimated Hessian values and artificially low local loss scores. Our controlled experiments show that quantizing these layers causes disproportionate PPL spikes that the local loss fails to predict, which motivates our calibrated sensitivity weighting mechanism.
 
 ## Methodology
 
@@ -27,6 +32,8 @@ We solve this by assigning varying bit-widths (3, 4, 5, 6 bits) to different ope
     *   **Goal:** Minimize total weighted quantization error.
     *   **Constraint:** Total VRAM footprint ≤ User-defined Budget ($V_{max}$).
 3.  **Dynamic Programming Solver:** We solve the allocation problem deterministically in milliseconds.
+
+### 3. Sentivity Correction
 
 ## Benchmark Results
 
@@ -100,7 +107,7 @@ Supported multi GPUs serial execution.
 
 Dense Models:
 
-Llama-2-7B / Llama-2-13B / Llama3-8B / Llama3.1-8B / Qwen3-8B / Qwen3-4B
+Llama-2-7B / Llama3-8B / Llama3.1-8B / Qwen2.5-7B / Qwen3-8B / Qwen3-4B
 
 ## Quick Start
 
