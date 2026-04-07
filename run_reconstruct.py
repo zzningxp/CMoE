@@ -112,7 +112,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     print("-" * 50)
-    print("model/quant-scheme/rank-mode: (ppl)", args.model, args.quant_scheme, args.rank_mode)
+    print("model/quant-scheme/rank-mode/profile-only-quant-layers/profile-only-quant-op: (ppl)", 
+          args.model, args.quant_scheme, args.rank_mode, args.profile_only_quant_layers, args.profile_only_quant_op)
     model, tokenizer = load_model(args.model)
 
     dataloader, testloader = get_loaders(

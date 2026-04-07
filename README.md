@@ -136,7 +136,6 @@ python run_reconstruct.py ~/models/$MODEL_PATH wikitext2 --mixqdense --nsamples 
 for i in `seq 0 35 `
 do
 python run_reconstruct.py ~/models/$MODEL_PATH wikitext2 --mixqdense --nsamples 64 --profile-only-quant-layers $i
-# sleep 60s
 done
 ```
 ```
@@ -146,10 +145,15 @@ python run_reconstruct.py ~/models/$MODEL_PATH wikitext2 --mixqdense --nsamples 
 done
 ```
 
+Also, you can probe the quantization of ONE specific operator on specific layer.
+I run every operator on every layer and save the result to a csv file. The result can replace the operator sensitivity dict.
+```
+python run_reconstruct.py ~/models/$MODEL_PATH wikitext2 --mixqdense --nsamples 64 --profile-only-quant-op $i --profile-only-quant-layers $j
+```
 Model evaluation without Quantization:
 ```
 # python
-python eval_cmoe.py $MODEL_PATH 
+python eval_reconstruct.py $MODEL_PATH 
 ```
 
 ## Code sources

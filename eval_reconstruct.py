@@ -313,13 +313,13 @@ def load_model(model_path):
         model = get_llama(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)
         if 'llama-2-7b' in model_path.lower():
-            model.model_id = 'llama-2-7b'
+            model.model_id = 'llama2-7b'
         if 'llama-2-13b' in model_path.lower():
-            model.model_id = 'llama-2-13b'
+            model.model_id = 'llama2-13b'
         if 'llama-3-8b' in model_path.lower():
-            model.model_id = 'llama-3-8b'
+            model.model_id = 'llama3-8b'
         if 'llama-3___1-8b' in model_path.lower():
-            model.model_id = 'llama-3___1-8b'
+            model.model_id = 'llama3___1-8b'
     elif 'qwen3-30b-a3b' in model_path.lower():
         model = get_qwen3_30b_a3b(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)

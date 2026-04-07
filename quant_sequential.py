@@ -1,5 +1,6 @@
 import json
 import os
+import pandas as pd
 import torch
 import torch.nn as nn
 import copy
@@ -61,7 +62,10 @@ def assign_quant_scheme_from_gptq_loss(gptq_losses_all, gptq_loss_lm_head,
                 mem_usage = weight_count * bpw / 8.0
                 
                 revised_loss = gptq_losses[bit][op_name]
-                revised_loss = revised_loss * OP_SENSITIVITY_WEIGHTS.get(op_name, 1.0)
+                if op_name in OP_SENSITIVITY_WEIGHTS:
+                    revised_loss = revised_loss * OP_SENSITIVITY_WEIGHTS.get(op_name)
+                else:
+                    revised_loss = revised_loss * OP_SENSITIVITY_WEIGHTS.get(layer_id).get(op_name)
                 # revised_loss = revised_loss * get_depth_sensitivity(layer_id, len(layer_ids))
                 
                 revised_loss = revised_loss / ((bit - 2 + 0.2)  ** 2)
@@ -475,8 +479,10 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
         weight_size_lm_head = {}
         all_hinvs = {}
         all_gains = {}
-        # op_bits = [2, 3, 4, 5, 6]
-        op_bits = [3, 4, 5, 6]
+        profile_ops = {}
+
+        op_bits = [2, 3, 4, 5, 6]
+        # op_bits = [3, 4, 5, 6]
         # op_bits = [4]
         model_id = getattr(model, 'model_id', None)
 
@@ -498,6 +504,22 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
                 all_hinvs = _loss_all['all_hinvs']
                 all_gains = _loss_all['all_gains']
             print(f"Loaded quantization data from files for model: {model_id}")
+
+            try:
+                profile_file_0 = f"test/ppl_{model_id.replace('-', '.')}_ppl on wikitext2_cluster_.csv"
+                profile_file_1 = f"test/ppl_{model_id.replace('-', '.')}_ppl on c4-new_cluster_.csv"
+                profile_0 = pd.read_csv(profile_file_0, sep='\t', header=None, on_bad_lines='warn')
+                profile_1 = pd.read_csv(profile_file_1, sep='\t', header=None, on_bad_lines='warn')
+                profile_op = profile_0 + profile_1
+                # profile_op = profile_1
+                v0 = profile_op.iloc[len(layers)][0]
+                profile_ops = {idx: 
+                                {op_name: v - float(v0) for op_name, v in zip(ops, row[:len(ops)])}
+                                for idx, row in profile_op.iterrows()}
+            except:
+                print(f"Can NOT Loaded quantization data, run pre-quantization profiling for model: {model_id}")
+                profile_ops = {}
+            print("profile_ops", profile_ops)
         else:
             if args.recompute_pre_quant == False:
                 print(f"Can NOT Loaded quantization data, run pre-quantization profiling for model: {model_id}")
@@ -581,12 +603,12 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
             with open(loss_file, 'w') as f:
                 json.dump(_loss_all, f)
 
-        print(f"GPTQ losses for all layers: ", gptq_losses_all)
-        print(f"GPTQ losses for lm_head: ", gptq_loss_lm_head)
-        print(f"Weight sizes for all layers: ", weight_sizes)
-        print(f"Weight sizes for lm_head: ", weight_size_lm_head)
-        print(f"All hinvs for all layers: ", all_hinvs)
-        print(f"All gains for all layers: ", all_gains)
+        # print(f"GPTQ losses for all layers: ", gptq_losses_all)
+        # print(f"GPTQ losses for lm_head: ", gptq_loss_lm_head)
+        # print(f"Weight sizes for all layers: ", weight_sizes)
+        # print(f"Weight sizes for lm_head: ", weight_size_lm_head)
+        # print(f"All hinvs for all layers: ", all_hinvs)
+        # print(f"All gains for all layers: ", all_gains)
 
         profile_base_bit = 8
         profile_low_bit = 2
@@ -598,15 +620,18 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
 
         print(args.profile_only_quant_layers, args.profile_only_quant_op)
         if args.profile_only_quant_layers == None and args.profile_only_quant_op == None:
-            sensitivity = {
-                'q_proj': 1.0,
-                'k_proj': 1.0,
-                'v_proj': 1.0 * 2, # softmax 
-                'o_proj': 1.0,
-                'up_proj': 1.0, # * model.config.hidden_size / model.config.intermediate_size,
-                'gate_proj': 1.0, # * model.config.hidden_size / model.config.intermediate_size,
-                'down_proj': 1.0 * model.config.intermediate_size / model.config.hidden_size,
-                }
+            if profile_ops is None:
+                sensitivity = {
+                    'q_proj': 1.0,
+                    'k_proj': 1.0,
+                    'v_proj': 1.0 * 2, # softmax 
+                    'o_proj': 1.0,
+                    'up_proj': 1.0, # * model.config.hidden_size / model.config.intermediate_size,
+                    'gate_proj': 1.0, # * model.config.hidden_size / model.config.intermediate_size,
+                    'down_proj': 1.0 * model.config.intermediate_size / model.config.hidden_size,
+                    }
+            else:
+                sensitivity = profile_ops
             # sensitivity = {}
             ops_ = ops + ['lm_head'] if quant_lm_head else ops
             print(f"ops_: ", quant_lm_head, ops_)
@@ -614,7 +639,13 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
             dyn_qschemes, dyn_losses = assign_quant_scheme_from_gptq_loss(
                 gptq_losses_all, gptq_loss_lm_head, weight_sizes, weight_size_lm_head, 
                 args.vram_quota, ops_, sensitivity, all_hinvs, all_gains, op_bits, fixed_lm_head_bit)
+        elif args.profile_only_quant_layers != None and args.profile_only_quant_op != None:
+            if args.profile_only_quant_layers == -1: 
+                assert False
+            print(f"Profile only quantization for layer {args.profile_only_quant_layers} and op {args.profile_only_quant_op} with bit {profile_low_bit}")
+            dyn_qschemes[int(args.profile_only_quant_layers)][args.profile_only_quant_op] = [profile_low_bit]
         elif args.profile_only_quant_layers != None:
+            print(f"Profile only quantization for layer {args.profile_only_quant_layers} with bit {profile_low_bit}")
             if args.profile_only_quant_layers == 'lm_head':
                 dyn_qschemes['lm_head'] = {'lm_head': [profile_low_bit]}
             elif isinstance(args.profile_only_quant_layers, int) and args.profile_only_quant_layers >= len(layers):
@@ -627,8 +658,10 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
                 ## profile_only_quant_layers == -1, profile all layers with high bit
                 ## do nothing
         elif args.profile_only_quant_op != None:
+            print(f"Profile only quantization for all layers op {args.profile_only_quant_op} with bit {profile_low_bit}")
             for layer_idx in range(len(layers)):
                 dyn_qschemes[layer_idx][args.profile_only_quant_op] = [profile_low_bit]
+
         print(f"Dynamic quantization schemes for each layer and op: ")
         for layer_idx in range(len(layers)):
             print(f"Layer {layer_idx}: ", dyn_qschemes[layer_idx])
