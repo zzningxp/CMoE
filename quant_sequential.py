@@ -620,7 +620,7 @@ def quant_sequential(model, tokenizer, dataloader, testloader, args):
 
         print(args.profile_only_quant_layers, args.profile_only_quant_op)
         if args.profile_only_quant_layers == None and args.profile_only_quant_op == None:
-            if profile_ops is None:
+            if profile_ops is {}:
                 sensitivity = {
                     'q_proj': 1.0,
                     'k_proj': 1.0,

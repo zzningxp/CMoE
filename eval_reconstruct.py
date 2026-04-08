@@ -319,7 +319,7 @@ def load_model(model_path):
         if 'llama-3-8b' in model_path.lower():
             model.model_id = 'llama3-8b'
         if 'llama-3___1-8b' in model_path.lower():
-            model.model_id = 'llama3___1-8b'
+            model.model_id = 'llama31-8b'
     elif 'qwen3-30b-a3b' in model_path.lower():
         model = get_qwen3_30b_a3b(model_path)
         tokenizer = AutoTokenizer.from_pretrained(model_path)

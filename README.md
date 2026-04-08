@@ -35,7 +35,18 @@ We solve this by assigning varying bit-widths (3, 4, 5, 6 bits) to different ope
 
 ### 3. Sentivity Correction
 
-## Benchmark Results
+V1 strategy: https://github.com/zzningxp/DartMQ/tree/v1-only-weight-only-dense-only-llm
+
+To bridge the gap between local quantization loss and global model perplexity (PPL), DMQ applies three lightweight, rule-based sensitivity adjustments:
+
+1.  **Hessian Diagonal Base Sensitivity**
+We use the maximum diagonal value of the GPTQ-processed approximate Hessian as the base sensitivity. This avoids iterative backpropagation, captures worst-case quantization noise, and prevents high-sensitivity sub-regions from being masked by mean values.
+2. **V-Proj Softmax Distribution Calibration**
+The exponential amplification of Softmax makes V-proj inputs highly concentrated, with a second-moment trace tr(H)≈0.8−0.9 (twice that of dense hidden layers). We apply a fixed multiplier of 2 to V-proj's base sensitivity to protect this error-sensitive layer.
+3. **Down-Proj Compression Ratio Scaling**
+Down-proj is the FFN's critical information bottleneck: its large compression ratio r=hidden_sizeintermediate_size​ amplifies noise, GPTQ propagates errors row-wise, and the preceding activation's squashing effect underestimates the Hessian. We scale its base sensitivity proportionally to r.
+
+## V1 Benchmark Results
 
 DartMQ performs near mixed-precision (AMQ) methods under identical memory constraints, but with significantly faster search time.
 
