@@ -64,7 +64,7 @@ def assign_quant_scheme_from_gptq_loss(gptq_losses_all, gptq_loss_lm_head,
                 revised_loss = gptq_losses[bit][op_name]
                 if op_name in OP_SENSITIVITY_WEIGHTS:
                     revised_loss = revised_loss * OP_SENSITIVITY_WEIGHTS.get(op_name)
-                else:
+                elif layer_id in OP_SENSITIVITY_WEIGHTS:
                     revised_loss = revised_loss * OP_SENSITIVITY_WEIGHTS.get(layer_id).get(op_name)
                 # revised_loss = revised_loss * get_depth_sensitivity(layer_id, len(layer_ids))
                 
