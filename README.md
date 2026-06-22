@@ -5,6 +5,8 @@
 
 Our core insight is transforming the precision allocation problem into a **Grouped Knapsack Problem**, solved optimally via **Dynamic Programming (DP)**. This approach eliminates the stochastic search overhead of AutoML methods, reducing search time from hours to minutes.
 
+DartMQ only supports dense LLM models, MoE models are supported in the another project: [DartMoQ](https://github.com/zzningxp/DartMoQ).
+
 ## Key Features
 
 *   **Hard Memory Constraint Satisfaction:** DartMQ prioritizes "fit-first, optimize-second." It guarantees the quantized model will strictly fit within your GPU/VRAM budget (e.g., 4GB, with command args --vram-quota 4.0 ), avoiding Out-Of-Memory (OOM) crashes.
@@ -180,5 +182,10 @@ Important code is inspired from: https://github.com/xuyuzhuang11/CAMERA
 If you found this work useful, please consider citing:
 
 ```
-
+@inproceedings{zhang2025dartmq,
+  title={DMQ: Direct Mixed-Precision Quantization for Fixed-Memory-Constrained GPU LLM Deployment},
+  author={Zhang, Zhaoning and Li, Zhongxing},
+  booktitle = {International {Conference} on {Intelligent} {Computing}},
+  year={2026}
+}
 ```
