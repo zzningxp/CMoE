@@ -185,7 +185,7 @@ If you found this work useful, please consider citing:
 @inproceedings{zhang2025dartmq,
   title={DMQ: Direct Mixed-Precision Quantization for Fixed-Memory-Constrained GPU LLM Deployment},
   author={Zhang, Zhaoning and Li, Zhongxing},
-  booktitle = {International {Conference} on {Intelligent} {Computing}},
+  booktitle = {International Conference on Intelligent Computing},
   year={2026}
 }
 ```
